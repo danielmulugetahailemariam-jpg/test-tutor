@@ -14,6 +14,11 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+import os
+import json
+import base64
+from google.oauth2.service_account import Credentials
+import gspread
 
 # --- CONFIGURATION ---
 BOT_TOKEN = "9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I"
@@ -24,8 +29,16 @@ logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=lo
 
 # --- GOOGLE SHEETS CONNECTION ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-client = gspread.authorize(creds)
+
+encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+if not encoded_creds:
+    raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
+
+decoded_json = base64.b64decode(encoded_creds).decode("utf-8")
+creds_info = json.loads(decoded_json)
+
+credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
+client = gspread.authorize(credentials)
 
 reg_sheet = client.open(SHEET_NAME).worksheet("Registrations")
 pdf_sheet = client.open(SHEET_NAME).worksheet("PDF_Library")
