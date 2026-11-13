@@ -36,11 +36,13 @@ def get_sheets():
         raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
     
     decoded_bytes = base64.b64decode(encoded_creds.strip())
-    with open("credentials.json", "wb") as f:
-        f.write(decoded_bytes)
+    creds_info = json.loads(decoded_bytes.decode("utf-8"))
     
-    # Correct method for Google's official credentials library
-    credentials = Credentials.from_service_account_file("credentials.json", scopes=scope)
+    # CRITICAL FIX: Convert literal text backslash-n into real newline bytes
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+
+    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
