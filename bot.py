@@ -1,0 +1,202 @@
+import asyncio
+import logging
+from datetime import datetime
+from flask import Flask, request
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    filters,
+)
+
+# --- CONFIGURATION ---
+BOT_TOKEN = "9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I"
+ADMIN_USER_ID = 2087550317
+SHEET_NAME = "Bishoftu Tutoring Hub DB"
+WEBHOOK_URL = f"https://danneymunroe.pythonanywhere.com/{9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I}"
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+
+# --- GOOGLE SHEETS CONNECTION ---
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("/home/danneymunroe/credentials.json", scope)
+client = gspread.authorize(creds)
+
+reg_sheet = client.open(SHEET_NAME).worksheet("Registrations")
+pdf_sheet = client.open(SHEET_NAME).worksheet("PDF_Library")
+
+NAME, GRADE, PHONE = range(3)
+
+# ==============================================================================
+# 1. REGISTRATION HANDLERS
+# ==============================================================================
+async def start_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 **Bishoftu Tutoring Hub**\n\nLet's reserve your seat.\n\nPlease enter the **Student's Full Name**:",
+        parse_mode="Markdown"
+    )
+    return NAME
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["name"] = update.message.text.strip()
+    keyboard = [
+        [InlineKeyboardButton("Grade 6", callback_data="Grade 6")],
+        [InlineKeyboardButton("Grade 8", callback_data="Grade 8")],
+        [InlineKeyboardButton("Grade 12 (Matric)", callback_data="Grade 12")],
+    ]
+    await update.message.reply_text(
+        "Select the student's **Grade Level**:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return GRADE
+
+async def get_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["grade"] = query.data
+    await query.edit_message_text(
+        f"Selected: **{query.data}**\n\nNow enter an active **Phone Number** (Parent or Student):",
+        parse_mode="Markdown"
+    )
+    return PHONE
+
+async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    name = context.user_data["name"]
+    grade = context.user_data["grade"]
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    all_rows = reg_sheet.get_all_values()
+    next_id = len(all_rows)
+    reg_sheet.append_row([next_id, name, grade, phone, "NEW", timestamp])
+
+    await update.message.reply_text(
+        f"✅ **Pre-Registration Successful!**\n\n"
+        f"👤 **Name:** {name}\n"
+        f"🏫 **Grade:** {grade}\n"
+        f"📞 **Phone:** {phone}\n\n"
+        f"We will contact you shortly to confirm your seat assignment.",
+        parse_mode="Markdown",
+    )
+
+    await context.bot.send_message(
+        chat_id=ADMIN_USER_ID,
+        text=f"🚨 **NEW REGISTRATION!**\n👤 {name} ({grade})\n📞 {phone}\n\nSend /check_leads to review.",
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Registration cancelled.")
+    return ConversationHandler.END
+
+# ==============================================================================
+# 2. ADMIN LEAD CHECKER
+# ==============================================================================
+async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    records = reg_sheet.get_all_records()
+    new_leads = [r for r in records if str(r.get("Status")).upper() == "NEW"]
+
+    if not new_leads:
+        await update.message.reply_text("✅ All caught up! No NEW registrations right now.")
+        return
+
+    msg = f"🔔 **UNSORTED REGISTRATIONS ({len(new_leads)}):**\n\n"
+    for lead in new_leads:
+        msg += f"• **{lead['Name']}** | {lead['Grade']} | `{lead['Phone']}`\n"
+
+    keyboard = [[InlineKeyboardButton("✔️ Mark All as SORTED", callback_data="mark_all_sorted")]]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def mark_sorted_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+
+    await query.answer("Updating Google Sheet...")
+    all_values = reg_sheet.get_all_values()
+
+    for idx, row in enumerate(all_values[1:], start=2):
+        if len(row) >= 5 and row[4].upper() == "NEW":
+            reg_sheet.update_cell(idx, 5, "SORTED")
+
+    await query.edit_message_text("✅ All new leads have been marked as **SORTED** in your Google Sheet.", parse_mode="Markdown")
+
+# ==============================================================================
+# 3. AUTOMATIC CHANNEL PDF CATEGORIZER
+# ==============================================================================
+async def auto_categorize_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = update.channel_post
+    if not post or not post.document:
+        return
+
+    doc = post.document
+    if not doc.file_name.lower().endswith(".pdf"):
+        return
+
+    file_name = doc.file_name
+    caption = post.caption or ""
+    search_text = f"{file_name} {caption}".lower()
+
+    if "12" in search_text or "matric" in search_text:
+        grade = "Grade 12"
+    elif "8" in search_text:
+        grade = "Grade 8"
+    elif "6" in search_text:
+        grade = "Grade 6"
+    else:
+        grade = "General"
+
+    subjects = ["math", "physics", "chemistry", "biology", "english", "general science", "history", "geography"]
+    detected_subject = "Other"
+    for sub in subjects:
+        if sub in search_text:
+            detected_subject = sub.title()
+            break
+
+    post_link = post.link if post.link else "Channel Document"
+    pdf_sheet.append_row([file_name, grade, detected_subject, doc.file_id, post_link])
+
+# ==============================================================================
+# 4. FLASK WEBHOOK APP
+# ==============================================================================
+app = Flask(__name__)
+
+ptb_app = Application.builder().token(BOT_TOKEN).build()
+reg_handler = ConversationHandler(
+    entry_points=[CommandHandler("register", start_register), CommandHandler("start", start_register)],
+    states={
+        NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+        GRADE: [CallbackQueryHandler(get_grade)],
+        PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+)
+ptb_app.add_handler(reg_handler)
+ptb_app.add_handler(CommandHandler("check_leads", check_leads))
+ptb_app.add_handler(CallbackQueryHandler(mark_sorted_callback, pattern="^mark_all_sorted$"))
+ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.PDF, auto_categorize_pdf))
+
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    async def process():
+        async with ptb_app:
+            update = Update.de_json(request.get_json(force=True), ptb_app.bot)
+            await ptb_app.process_update(update)
+    asyncio.run(process())
+    return "OK", 200
+
+@app.route("/")
+def index():
+    return "Bishoftu Tutoring Bot is active!"
