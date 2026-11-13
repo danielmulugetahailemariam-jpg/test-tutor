@@ -36,14 +36,12 @@ def get_sheets():
     if not encoded_creds:
         raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
     
-    # Decode base64 directly into string data
+    # Decode the base64 string directly into a dictionary
     decoded_json_str = base64.b64decode(encoded_creds.strip()).decode("utf-8")
+    creds_info = json.loads(decoded_json_str)
     
-    # Pass the JSON string through StringIO so Google's file-loader reads it 
-    # with native stream parsing, keeping the private_key cryptographic newlines intact
-    cred_file_stream = io.StringIO(decoded_json_str)
-    
-    credentials = Credentials.from_service_account_file(cred_file_stream, scopes=scope)
+    # Pass the dictionary directly to avoid all file path and stream type errors
+    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
