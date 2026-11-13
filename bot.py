@@ -1,7 +1,7 @@
-import asyncio
 import logging
 from datetime import datetime
-from flask import Flask, request
+from http import HTTPStatus
+from fastapi import FastAPI, Request, Response
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -19,13 +19,12 @@ from telegram.ext import (
 BOT_TOKEN = "9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I"
 ADMIN_USER_ID = 2087550317
 SHEET_NAME = "Bishoftu Tutoring Hub DB"
-WEBHOOK_URL = f"https://danneymunroe.pythonanywhere.com/{9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I}"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # --- GOOGLE SHEETS CONNECTION ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("/home/danneymunroe/credentials.json", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
 
 reg_sheet = client.open(SHEET_NAME).worksheet("Registrations")
@@ -169,11 +168,12 @@ async def auto_categorize_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
     pdf_sheet.append_row([file_name, grade, detected_subject, doc.file_id, post_link])
 
 # ==============================================================================
-# 4. FLASK WEBHOOK APP
+# 4. FASTAPI APP & PTB LIFECYCLE
 # ==============================================================================
-app = Flask(__name__)
+app = FastAPI()
 
 ptb_app = Application.builder().token(BOT_TOKEN).build()
+
 reg_handler = ConversationHandler(
     entry_points=[CommandHandler("register", start_register), CommandHandler("start", start_register)],
     states={
@@ -188,15 +188,23 @@ ptb_app.add_handler(CommandHandler("check_leads", check_leads))
 ptb_app.add_handler(CallbackQueryHandler(mark_sorted_callback, pattern="^mark_all_sorted$"))
 ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.PDF, auto_categorize_pdf))
 
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    async def process():
-        async with ptb_app:
-            update = Update.de_json(request.get_json(force=True), ptb_app.bot)
-            await ptb_app.process_update(update)
-    asyncio.run(process())
-    return "OK", 200
+@app.on_event("startup")
+async def startup_event():
+    await ptb_app.initialize()
+    await ptb_app.start()
 
-@app.route("/")
+@app.on_event("shutdown")
+async def shutdown_event():
+    await ptb_app.stop()
+    await ptb_app.shutdown()
+
+@app.post(f"/{BOT_TOKEN}")
+async def webhook(request: Request):
+    req_json = await request.json()
+    update = Update.de_json(req_json, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return Response(status_code=HTTPStatus.OK)
+
+@app.get("/")
 def index():
-    return "Bishoftu Tutoring Bot is active!"
+    return {"status": "Bishoftu Tutoring Bot is active!"}
