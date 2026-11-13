@@ -31,7 +31,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 def get_sheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    # Automatically recreate credentials.json on Render's disk from the base64 env var
     encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
     if not encoded_creds:
         raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
@@ -40,8 +39,8 @@ def get_sheets():
     with open("credentials.json", "wb") as f:
         f.write(decoded_bytes)
     
-    # Load directly from the physical file (bypasses all dictionary string-escaping bugs)
-    credentials = Credentials.from_json_keyfile_name("credentials.json", scopes=scope)
+    # Correct method for Google's official credentials library
+    credentials = Credentials.from_service_account_file("credentials.json", scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
