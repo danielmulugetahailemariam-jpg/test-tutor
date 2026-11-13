@@ -32,15 +32,22 @@ from oauth2client.service_account import ServiceAccountCredentials
 def get_sheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
-    if not encoded_creds:
-        raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
+    client_email = os.environ.get("GOOGLE_CLIENT_EMAIL")
+    private_key = os.environ.get("GOOGLE_PRIVATE_KEY")
     
-    # Decode the base64 string directly into a dictionary
-    decoded_json_str = base64.b64decode(encoded_creds.strip()).decode("utf-8")
-    creds_info = json.loads(decoded_json_str)
+    if not client_email or not private_key:
+        raise ValueError("GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY environment variables are missing!")
     
-    # Pass the dictionary directly to avoid all file path and stream type errors
+    # Clean and restore real newline characters to the private key
+    clean_private_key = private_key.replace("\\n", "\n").replace("\r", "")
+    
+    creds_info = {
+        "type": "service_account",
+        "client_email": client_email.strip(),
+        "private_key": clean_private_key.strip(),
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    
     credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
     client = gspread.authorize(credentials)
     
