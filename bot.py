@@ -32,25 +32,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 def get_sheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     
-    client_email = os.environ.get("GOOGLE_CLIENT_EMAIL")
-    private_key = os.environ.get("GOOGLE_PRIVATE_KEY")
-    
-    if not client_email or not private_key:
-        raise ValueError("GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY environment variables are missing!")
-    
-    pk = private_key.strip().strip('"').strip("'")
-    if "\\n" in pk and "\n" not in pk:
-        pk = pk.replace("\\n", "\n")
-    pk = pk.replace("\r", "")
-    
-    creds_info = {
-        "type": "service_account",
-        "client_email": client_email.strip().strip('"').strip("'"),
-        "private_key": pk,
-        "token_uri": "https://oauth2.googleapis.com/token",
-    }
-    
-    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
+    # Load directly from the local credentials.json file in your project repo
+    credentials = Credentials.from_service_account_file("credentials.json", scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
