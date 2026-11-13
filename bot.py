@@ -1,9 +1,12 @@
+import os
+import json
+import base64
 import logging
 from datetime import datetime
 from http import HTTPStatus
 from fastapi import FastAPI, Request, Response
+from google.oauth2.service_account import Credentials
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,11 +17,6 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-import os
-import json
-import base64
-from google.oauth2.service_account import Credentials
-import gspread
 
 # --- CONFIGURATION ---
 BOT_TOKEN = "9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I"
@@ -27,21 +25,21 @@ SHEET_NAME = "Bishoftu Tutoring Hub DB"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# --- GOOGLE SHEETS CONNECTION ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-
-encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
-if not encoded_creds:
-    raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
-
-decoded_json = base64.b64decode(encoded_creds).decode("utf-8")
-creds_info = json.loads(decoded_json)
-
-credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
-client = gspread.authorize(credentials)
-
-reg_sheet = client.open(SHEET_NAME).worksheet("Registrations")
-pdf_sheet = client.open(SHEET_NAME).worksheet("PDF_Library")
+# --- LAZY GOOGLE SHEETS CONNECTOR ---
+def get_sheets():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+    if not encoded_creds:
+        raise ValueError("GOOGLE_CREDENTIALS_BASE64 environment variable is missing!")
+    
+    decoded_json = base64.b64decode(encoded_creds.strip()).decode("utf-8")
+    creds_info = json.loads(decoded_json)
+    
+    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
+    client = gspread.authorize(credentials)
+    
+    sheet_doc = client.open(SHEET_NAME)
+    return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
 
 NAME, GRADE, PHONE = range(3)
 
@@ -85,6 +83,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grade = context.user_data["grade"]
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    reg_sheet, _ = get_sheets()
     all_rows = reg_sheet.get_all_values()
     next_id = len(all_rows)
     reg_sheet.append_row([next_id, name, grade, phone, "NEW", timestamp])
@@ -116,6 +115,7 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
 
+    reg_sheet, _ = get_sheets()
     records = reg_sheet.get_all_records()
     new_leads = [r for r in records if str(r.get("Status")).upper() == "NEW"]
 
@@ -137,6 +137,7 @@ async def mark_sorted_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await query.answer("Updating Google Sheet...")
+    reg_sheet, _ = get_sheets()
     all_values = reg_sheet.get_all_values()
 
     for idx, row in enumerate(all_values[1:], start=2):
@@ -178,6 +179,7 @@ async def auto_categorize_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
             break
 
     post_link = post.link if post.link else "Channel Document"
+    _, pdf_sheet = get_sheets()
     pdf_sheet.append_row([file_name, grade, detected_subject, doc.file_id, post_link])
 
 # ==============================================================================
