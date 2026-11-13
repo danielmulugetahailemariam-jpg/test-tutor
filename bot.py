@@ -27,24 +27,12 @@ SHEET_NAME = "Bishoftu Tutoring Hub DB"
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # --- LAZY GOOGLE SHEETS CONNECTOR ---
-from oauth2client.service_account import ServiceAccountCredentials
-
 def get_sheets():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    # Read credentials.json manually and strip Windows carriage returns (\r) 
-    # introduced by Git on Windows workstations
-    with open("credentials.json", "r", encoding="utf-8") as f:
-        clean_json_str = f.read().replace("\r", "")
-    
-    creds_info = json.loads(clean_json_str)
-    
-    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
-    client = gspread.authorize(credentials)
+    # gspread natively handles file loading, scopes, and cryptographic signing
+    client = gspread.service_account(filename="credentials.json")
     
     sheet_doc = client.open(SHEET_NAME)
     return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
-
 
 NAME, GRADE, PHONE = range(3)
 
