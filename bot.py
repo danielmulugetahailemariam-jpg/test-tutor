@@ -38,13 +38,15 @@ def get_sheets():
     if not client_email or not private_key:
         raise ValueError("GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY environment variables are missing!")
     
-    # Clean and restore real newline characters to the private key
-    clean_private_key = private_key.replace("\\n", "\n").replace("\r", "")
+    pk = private_key.strip().strip('"').strip("'")
+    if "\\n" in pk and "\n" not in pk:
+        pk = pk.replace("\\n", "\n")
+    pk = pk.replace("\r", "")
     
     creds_info = {
         "type": "service_account",
-        "client_email": client_email.strip(),
-        "private_key": clean_private_key.strip(),
+        "client_email": client_email.strip().strip('"').strip("'"),
+        "private_key": pk,
         "token_uri": "https://oauth2.googleapis.com/token",
     }
     
