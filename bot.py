@@ -26,6 +26,8 @@ SHEET_NAME = "Bishoftu Tutoring Hub DB"
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
 # --- LAZY GOOGLE SHEETS CONNECTOR ---
+from oauth2client.service_account import ServiceAccountCredentials
+
 def get_sheets():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     encoded_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
@@ -35,14 +37,8 @@ def get_sheets():
     decoded_json = base64.b64decode(encoded_creds.strip()).decode("utf-8")
     creds_info = json.loads(decoded_json)
     
-    # Robustly normalize private key newlines
-    if "private_key" in creds_info:
-        pk = creds_info["private_key"]
-        # Handle double or single escaped newlines from JSON storage
-        pk = pk.replace("\\\\n", "\n").replace("\\n", "\n")
-        creds_info["private_key"] = pk
-
-    credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
+    # oauth2client handles private key formatting natively without signature errors
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds_info, scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
