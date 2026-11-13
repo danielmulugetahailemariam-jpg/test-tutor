@@ -35,12 +35,16 @@ def get_sheets():
     decoded_json = base64.b64decode(encoded_creds.strip()).decode("utf-8")
     creds_info = json.loads(decoded_json)
     
+    # Fix private key newline formatting automatically
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\\\n", "\n").replace("\\n", "\n")
+
     credentials = Credentials.from_service_account_info(creds_info, scopes=scope)
     client = gspread.authorize(credentials)
     
     sheet_doc = client.open(SHEET_NAME)
     return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
-
+    
 NAME, GRADE, PHONE = range(3)
 
 # ==============================================================================
