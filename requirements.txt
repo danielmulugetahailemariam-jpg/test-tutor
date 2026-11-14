@@ -2,4 +2,7 @@ fastapi
 uvicorn
 python-telegram-bot
 gspread
+google-auth
+google-api-python-client
+httpx
 gunicorn
