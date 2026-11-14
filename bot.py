@@ -100,8 +100,8 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=ADMIN_USER_ID,
-        text=f"🚨 **NEW REGISTRATION!**\n👤 {name} ({grade})\n📞 {phone}\n\nSend /check_leads to review.",
-        parse_mode="Markdown",
+        text=f"🚨 <b>NEW REGISTRATION!</b>\n👤 {name} ({grade})\n📞 {phone}\n\nSend /check_leads to review.",
+        parse_mode="HTML",
     )
     return ConversationHandler.END
 
