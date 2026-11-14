@@ -1,7 +1,6 @@
 import os
 import json
 import html
-import base64
 import asyncio
 import logging
 from datetime import datetime
@@ -12,7 +11,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from fastapi import FastAPI, Request, Response
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
 from telegram.ext import (
     Application,
     ContextTypes,
@@ -24,6 +23,7 @@ from telegram.ext import (
 )
 
 from classifier import classify_material, is_excluded_file, normalize_stem
+from webapp_api import create_webapp_router
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -32,6 +32,9 @@ SHEET_NAME = os.getenv("SHEET_NAME", "Bishoftu Tutoring Hub DB")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "").strip()
 CONVERTER_SCRIPT_URL = os.getenv("CONVERTER_SCRIPT_URL", "").strip()
 CONVERTER_SECRET = os.getenv("CONVERTER_SECRET", "").strip()
+
+BASE_URL = (os.getenv("WEBAPP_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+WEBAPP_URL = f"{BASE_URL}/webapp" if BASE_URL else ""
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -95,15 +98,20 @@ def ensure_headers(sheet, expected_headers):
     if not first_row:
         sheet.update("A1", [expected_headers])
     elif first_row != expected_headers and len(first_row) < len(expected_headers):
-        # Safely append any missing trailing columns (like Telegram_ID on Registrations)
         sheet.update("A1", [expected_headers])
+
+
+def library_keyboard():
+    if not WEBAPP_URL:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📚 Open Study Library", web_app=WebAppInfo(url=WEBAPP_URL))]])
 
 
 NAME, GRADE, PHONE = range(3)
 
 
 # ==============================================================================
-# 1. REGISTRATION HANDLERS (WITH TELEGRAM_ID & APPROVAL CHECK)
+# 1. REGISTRATION & LIBRARY LAUNCH HANDLERS
 # ==============================================================================
 def find_registration_by_tg_id(reg_sheet, tg_id: int):
     rows = reg_sheet.get_all_values()
@@ -113,6 +121,37 @@ def find_registration_by_tg_id(reg_sheet, tg_id: int):
             name = row[1] if len(row) >= 2 else "Student"
             return idx, name, status
     return None
+
+
+async def open_library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    def _check():
+        reg_sheet, _ = get_sheets()
+        ensure_headers(reg_sheet, REG_HEADERS)
+        return find_registration_by_tg_id(reg_sheet, user_id)
+
+    existing = await asyncio.to_thread(_check)
+    is_approved = (user_id == ADMIN_USER_ID) or (existing and existing[2] == "APPROVED")
+
+    if not is_approved:
+        if not existing:
+            await update.message.reply_text("📝 Please register first by sending /start.")
+        elif existing[2] == "NEW":
+            await update.message.reply_text("⏳ Your registration is pending admin approval. Check back shortly!")
+        else:
+            await update.message.reply_text("🚫 Your account does not currently have library access.")
+        return
+
+    if not WEBAPP_URL:
+        await update.message.reply_text("⚠️ Web App URL is not configured yet.")
+        return
+
+    await update.message.reply_text(
+        "📚 Tap below to open the <b>Bishoftu Tutoring Hub Study Library</b>:",
+        reply_markup=library_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def start_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -130,6 +169,7 @@ async def start_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if status == "APPROVED":
             await update.message.reply_text(
                 f"👋 Welcome back, <b>{safe_name}</b>!\n\n✅ Your registration is <b>APPROVED</b>.",
+                reply_markup=library_keyboard(),
                 parse_mode="HTML",
             )
             return ConversationHandler.END
@@ -188,6 +228,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reg_sheet.append_row([next_id, name, grade, phone, "NEW", timestamp, str(tg_id)])
 
     await asyncio.to_thread(_save)
+    webapp_router.invalidate_reg_cache()
 
     safe_name = html.escape(name)
     safe_grade = html.escape(grade)
@@ -239,11 +280,7 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return reg_sheet.get_all_values()
 
     rows = await asyncio.to_thread(_fetch)
-    new_leads = []
-    for row in rows[1:]:
-        status = row[4].strip().upper() if len(row) >= 5 else ""
-        if status == "NEW":
-            new_leads.append(row)
+    new_leads = [row for row in rows[1:] if len(row) >= 5 and row[4].strip().upper() == "NEW"]
 
     if not new_leads:
         await update.message.reply_text("✅ All caught up! No NEW registrations right now.")
@@ -289,11 +326,14 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
             return approved_ids
 
         approved_ids = await asyncio.to_thread(_approve_all)
+        webapp_router.invalidate_reg_cache()
+
         for uid in approved_ids:
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text="🎉 <b>Good news!</b> Your Bishoftu Tutoring Hub registration has been <b>APPROVED</b>.",
+                    text="🎉 <b>Good news!</b> Your Bishoftu Tutoring Hub registration has been <b>APPROVED</b>.\n\nTap below to open the Study Library:",
+                    reply_markup=library_keyboard(),
                     parse_mode="HTML",
                 )
             except Exception as e:
@@ -318,12 +358,15 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         return None
 
     student_name = await asyncio.to_thread(_update_single)
+    webapp_router.invalidate_reg_cache()
+
     if student_name:
         if new_status == "APPROVED":
             try:
                 await context.bot.send_message(
                     chat_id=int(tg_id_str),
-                    text="🎉 <b>Good news!</b> Your Bishoftu Tutoring Hub registration has been <b>APPROVED</b>.",
+                    text="🎉 <b>Good news!</b> Your Bishoftu Tutoring Hub registration has been <b>APPROVED</b>.\n\nTap below to open the Study Library:",
+                    reply_markup=library_keyboard(),
                     parse_mode="HTML",
                 )
             except Exception as e:
@@ -341,7 +384,6 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
 # 3. EXAM <-> ANSWER LINKING & OPTIONAL APPS SCRIPT CONVERTER
 # ==============================================================================
 async def convert_office_via_apps_script(drive_file_id: str) -> str | None:
-    """Asks user's Google Apps Script Web App to create a .pdf twin next to a .pptx/.docx in Drive."""
     if not CONVERTER_SCRIPT_URL:
         return None
     try:
@@ -360,11 +402,9 @@ async def convert_office_via_apps_script(drive_file_id: str) -> str | None:
 
 
 def compute_exam_answer_links(all_rows_with_headers: list[list[str]]):
-    """Finds unlinked Answer Sheets & Exams with matching Link_Key / Base_Link_Key and returns batch updates."""
     if len(all_rows_with_headers) <= 1:
         return []
 
-    # Indexes (0-based): Doc_ID=0, Subject=4, Category=5, Year=6, Exam_Tag=7, Link_Key=9, Linked_Doc_ID=10, Has_Embedded=11
     exams_exact = {}
     exams_base = {}
     answers = []
@@ -396,7 +436,6 @@ def compute_exam_answer_links(all_rows_with_headers: list[list[str]]):
         candidates = exams_exact.get(ans_link_key) or exams_base.get(ans_base_key)
         if not candidates:
             continue
-        # Link to first matching exam (and link exam back to answer sheet)
         ex_row_idx, ex_doc_id, ex_linked = candidates[0]
         updates.append({"range": f"K{ans_row_idx}", "values": [[ex_doc_id]]})
         if not ex_linked:
@@ -465,7 +504,6 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await status_msg.edit_text(f"❌ Drive sync failed: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         return
 
-    # Track already-indexed Drive IDs & MD5 checksums
     existing_drive_ids = set()
     existing_unique_keys = set()
     stem_to_row_idx = {}
@@ -479,7 +517,6 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if len(row) >= 2:
             stem_to_row_idx[normalize_stem(row[1])] = idx
 
-    # Group Drive files by normalized stem so .pptx/.docx pairs with .pdf cleanly
     grouped_files = {}
     skipped_excluded = 0
     skipped_duplicates = 0
@@ -502,11 +539,9 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         stem = normalize_stem(fname)
         ext = fname.rsplit(".", 1)[-1].lower()
         grouped_files.setdefault(stem, {})
-        # Keep first copy if another (1)/(2) variant exists in the same run
         if ext not in grouped_files[stem]:
             grouped_files[stem][ext] = f
 
-    # Optionally convert any standalone .pptx/.docx into PDF via Apps Script
     converted_count = 0
     if CONVERTER_SCRIPT_URL:
         for stem, ext_map in grouped_files.items():
@@ -522,8 +557,7 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     }
                     converted_count += 1
 
-    # Build batch rows
-    next_num = len(existing_rows)  # Header is row 1, so first item is DOC-0001
+    next_num = len(existing_rows)
     new_rows = []
     twin_updates = []
 
@@ -531,7 +565,6 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pdf_file = ext_map.get("pdf")
         office_file = ext_map.get("pptx") or ext_map.get("docx")
 
-        # If PDF already existed in sheet from earlier, attach newly found PPTX/DOCX twin
         if stem in stem_to_row_idx and office_file and not pdf_file:
             row_idx = stem_to_row_idx[stem]
             twin_updates.append({"range": f"Q{row_idx}", "values": [[office_file["id"]]]})
@@ -568,23 +601,22 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             meta["exam_tag"],
             meta["round_or_code"],
             meta["link_key"],
-            "",  # Linked_Doc_ID (computed right after batch append)
+            "",
             meta["has_embedded_answer"],
             format_str,
             size_mb,
             "Drive",
             pdf_file["id"] if pdf_file else "",
             office_file["id"] if office_file else "",
-            "",  # Telegram_File_ID
+            "",
             primary.get("md5Checksum") or primary["id"],
-            "",  # Post_Link
+            "",
         ])
 
     def _write_and_link():
         if twin_updates:
             pdf_sheet.batch_update(twin_updates)
         if new_rows:
-            # Append in chunks of 250 rows to stay well within payload limits
             for i in range(0, len(new_rows), 250):
                 pdf_sheet.append_rows(new_rows[i : i + 250], value_input_option="USER_ENTERED")
 
@@ -595,6 +627,7 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return len(link_updates) // 2
 
     paired_count = await asyncio.to_thread(_write_and_link)
+    webapp_router.invalidate_library_cache()
 
     await status_msg.edit_text(
         f"✅ <b>Google Drive Sync Complete!</b>\n\n"
@@ -631,7 +664,6 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
         ensure_headers(pdf_sheet, PDF_HEADERS)
         rows = pdf_sheet.get_all_values()
 
-        # Check duplicate by Unique_Key
         for r in rows[1:]:
             if len(r) >= 19 and r[18] == doc.file_unique_id:
                 return None, 0
@@ -667,6 +699,8 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
         return doc_id, len(link_updates)
 
     doc_id, links_made = await asyncio.to_thread(_append_and_link)
+    webapp_router.invalidate_library_cache()
+
     if doc_id and meta["category"] == "Answer Sheet" and meta["year"] == "" and links_made == 0:
         await context.bot.send_message(
             chat_id=ADMIN_USER_ID,
@@ -679,10 +713,21 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ==============================================================================
-# 6. FASTAPI APP & PTB LIFECYCLE
+# 6. FASTAPI APP, MINI APP ROUTER & PTB LIFECYCLE
 # ==============================================================================
 app = FastAPI()
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
+
+webapp_router = create_webapp_router(
+    bot_token=BOT_TOKEN,
+    admin_user_id=ADMIN_USER_ID,
+    get_ptb_app=lambda: ptb_app,
+    get_sheets_fn=get_sheets,
+    get_credentials_fn=get_credentials,
+    reg_headers=REG_HEADERS,
+    pdf_headers=PDF_HEADERS,
+)
+app.include_router(webapp_router)
 
 reg_handler = ConversationHandler(
     entry_points=[CommandHandler("register", start_register), CommandHandler("start", start_register)],
@@ -694,6 +739,7 @@ reg_handler = ConversationHandler(
     fallbacks=[CommandHandler("cancel", cancel)],
 )
 ptb_app.add_handler(reg_handler)
+ptb_app.add_handler(CommandHandler("library", open_library_command))
 ptb_app.add_handler(CommandHandler("check_leads", check_leads))
 ptb_app.add_handler(CommandHandler("sync_drive", sync_drive_command))
 ptb_app.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r"^(approve_user:|reject_user:|approve_all_new)"))
@@ -704,6 +750,14 @@ ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.A
 async def startup_event():
     await ptb_app.initialize()
     await ptb_app.start()
+    if WEBAPP_URL:
+        try:
+            await ptb_app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📚 Library", web_app=WebAppInfo(url=WEBAPP_URL))
+            )
+            logger.info(f"Set MenuButtonWebApp to {WEBAPP_URL}")
+        except Exception as e:
+            logger.warning(f"Could not set chat menu button: {e}")
 
 
 @app.on_event("shutdown")
