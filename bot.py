@@ -1,12 +1,9 @@
 import os
-import io
 import json
-import base64
 import logging
 from datetime import datetime
 from http import HTTPStatus
 from fastapi import FastAPI, Request, Response
-from google.oauth2.service_account import Credentials
 import gspread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,21 +17,29 @@ from telegram.ext import (
 )
 
 # --- CONFIGURATION ---
-BOT_TOKEN = "9214264770:AAFdw0tcw0F5BcXBrwkFxh9m7HzRODaq36I"
-ADMIN_USER_ID = 2087550317
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "2087550317"))
 SHEET_NAME = "Bishoftu Tutoring Hub DB"
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+
 # --- LAZY GOOGLE SHEETS CONNECTOR ---
 def get_sheets():
-    # gspread natively handles file loading, scopes, and cryptographic signing
-    client = gspread.service_account(filename="credentials.json")
-    
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        client = gspread.service_account_from_dict(json.loads(creds_json))
+    elif os.path.exists("/etc/secrets/credentials.json"):
+        client = gspread.service_account(filename="/etc/secrets/credentials.json")
+    else:
+        client = gspread.service_account(filename="credentials.json")
+
     sheet_doc = client.open(SHEET_NAME)
     return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
 
+
 NAME, GRADE, PHONE = range(3)
+
 
 # ==============================================================================
 # 1. REGISTRATION HANDLERS
@@ -42,9 +47,10 @@ NAME, GRADE, PHONE = range(3)
 async def start_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 **Bishoftu Tutoring Hub**\n\nLet's reserve your seat.\n\nPlease enter the **Student's Full Name**:",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     return NAME
+
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["name"] = update.message.text.strip()
@@ -56,9 +62,10 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Select the student's **Grade Level**:",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     return GRADE
+
 
 async def get_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -66,9 +73,10 @@ async def get_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["grade"] = query.data
     await query.edit_message_text(
         f"Selected: **{query.data}**\n\nNow enter an active **Phone Number** (Parent or Student):",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     return PHONE
+
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
@@ -97,9 +105,11 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration cancelled.")
     return ConversationHandler.END
+
 
 # ==============================================================================
 # 2. ADMIN LEAD CHECKER
@@ -123,6 +133,7 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("✔️ Mark All as SORTED", callback_data="mark_all_sorted")]]
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+
 async def mark_sorted_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != ADMIN_USER_ID:
@@ -139,6 +150,7 @@ async def mark_sorted_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await query.edit_message_text("✅ All new leads have been marked as **SORTED** in your Google Sheet.", parse_mode="Markdown")
 
+
 # ==============================================================================
 # 3. AUTOMATIC CHANNEL PDF CATEGORIZER
 # ==============================================================================
@@ -148,7 +160,7 @@ async def auto_categorize_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     doc = post.document
-    if not doc.file_name.lower().endswith(".pdf"):
+    if not doc.file_name or not doc.file_name.lower().endswith(".pdf"):
         return
 
     file_name = doc.file_name
@@ -175,12 +187,13 @@ async def auto_categorize_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE
     _, pdf_sheet = get_sheets()
     pdf_sheet.append_row([file_name, grade, detected_subject, doc.file_id, post_link])
 
+
 # ==============================================================================
 # 4. FASTAPI APP & PTB LIFECYCLE
 # ==============================================================================
 app = FastAPI()
 
-ptb_app = Application.builder().token(BOT_TOKEN).build()
+ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 reg_handler = ConversationHandler(
     entry_points=[CommandHandler("register", start_register), CommandHandler("start", start_register)],
@@ -196,15 +209,18 @@ ptb_app.add_handler(CommandHandler("check_leads", check_leads))
 ptb_app.add_handler(CallbackQueryHandler(mark_sorted_callback, pattern="^mark_all_sorted$"))
 ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.PDF, auto_categorize_pdf))
 
+
 @app.on_event("startup")
 async def startup_event():
     await ptb_app.initialize()
     await ptb_app.start()
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await ptb_app.stop()
     await ptb_app.shutdown()
+
 
 @app.post(f"/{BOT_TOKEN}")
 async def webhook(request: Request):
@@ -212,6 +228,7 @@ async def webhook(request: Request):
     update = Update.de_json(req_json, ptb_app.bot)
     await ptb_app.process_update(update)
     return Response(status_code=HTTPStatus.OK)
+
 
 @app.get("/")
 def index():
