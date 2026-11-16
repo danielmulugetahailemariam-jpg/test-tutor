@@ -161,13 +161,11 @@ let visibleLimit = 30;
 let cachedPlans = null;
 let progress = { bookmarks: [], last_read: {}, plan_progress: {}, custom_plan: [] };
 
-// Onboarding state
 let selectedRole = "student";
 let selectedStudentGrade = "Grade 12";
 let selectedStudentStream = "Natural";
 let parentChildren = [{ name: "", grade: "Grade 12", stream: "Natural", format: "Weekend Hub", child_contact: "" }];
 
-// Reader & Quiz state
 let readerMainDoc = null, readerAnswerDoc = null, showingAnswer = false;
 let currentPdfDoc = null, currentPage = 1, savedMainPage = 1, savedAnswerPage = 1, zoomMultiplier = 1.0, renderTask = null;
 let activeQuizMeta = null, quizAnswers = {}, quizTimerInt = null, quizSeconds = 0;
@@ -176,7 +174,7 @@ function showToast(msg) {
   const el = document.getElementById("toast");
   el.textContent = msg;
   el.classList.remove("hidden");
-  setTimeout(() => el.classList.add("hidden"), 3200);
+  setTimeout(() => el.classList.add("hidden"), 3400);
 }
 function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
 function escapeHtml(s) {
@@ -195,7 +193,11 @@ async function initApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData: tg.initData || "" }),
     });
-    const data = await res.json();
+    const raw = await res.text();
+    let data = {};
+    try { data = JSON.parse(raw); } catch { throw new Error(raw.slice(0, 120) || "Server error"); }
+
+    if (!res.ok) throw new Error(data.detail || "Auth error");
 
     document.getElementById("splashView").classList.add("hidden");
 
@@ -204,7 +206,6 @@ async function initApp() {
         document.getElementById("outsideView").classList.remove("hidden");
         return;
       }
-      // Show In-App Bilingual Registration Wizard!
       setupOnboarding();
       document.getElementById("onboardingView").classList.remove("hidden");
       return;
@@ -232,7 +233,7 @@ async function initApp() {
   } catch (err) {
     document.getElementById("splashView").classList.add("hidden");
     document.getElementById("outsideTitle").textContent = "Connection Error";
-    document.getElementById("outsideMsg").textContent = "Could not reach server. Please reopen the Mini App.";
+    document.getElementById("outsideMsg").textContent = err?.message || "Could not reach server. Please reopen the Mini App.";
     document.getElementById("outsideView").classList.remove("hidden");
   }
 }
@@ -397,7 +398,9 @@ document.getElementById("submitRegBtn").onclick = async () => {
         children: payloadChildren,
       }),
     });
-    const data = await res.json();
+    const rawText = await res.text();
+    let data = {};
+    try { data = JSON.parse(rawText); } catch { throw new Error(rawText.slice(0, 120) || "Server error"); }
     if (!res.ok || !data.ok) {
       throw new Error(data.detail || "Registration failed");
     }
@@ -412,7 +415,6 @@ document.getElementById("submitRegBtn").onclick = async () => {
   }
 };
 
-// Language Toggle Buttons
 async function toggleLanguage() {
   currentLang = currentLang === "en" ? "am" : "en";
   localStorage.setItem("qelal_lang", currentLang);
@@ -442,7 +444,6 @@ function renderHeaderAndBanners() {
   document.getElementById("hdrRefCount").textContent = userProfile.referral_count || 0;
   if (userProfile.is_admin) document.getElementById("refreshBtn").classList.remove("hidden");
 
-  // Personalized Grade-Specific Countdown
   const cd = userProfile.countdown;
   if (cd && cd.date) {
     const diff = Math.ceil((new Date(cd.date) - new Date()) / 86400000);
@@ -1012,7 +1013,6 @@ async function loadActiveReaderDoc() {
     document.getElementById("readerLoadText").textContent = `Could not open PDF (${err?.message || "error"}). Try 'Offline (TG)'.`;
   }
 }
-
 
 async function renderPage(num) {
   if (!currentPdfDoc) return;
