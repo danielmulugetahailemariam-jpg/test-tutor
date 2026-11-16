@@ -1021,10 +1021,12 @@ async def download_doc_bytes(drive_token: str | None, drive_pdf_id: str, telegra
 async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    status_msg = await update.message.reply_text("🔍 Inspecting PDFs to verify Exam ↔ Answer links & parse Quiz keys...")
+    status_msg = await update.message.reply_text("🔍 Inspecting PDFs to verify & smart-match Exam ↔ Answer links...")
+
+    from link_verifier import analyze_answer_pdf, score_exam_answer_match
 
     def _load():
-        _, pdf_sheet, keys_sheet, _, _, _ = get_all_worksheets()
+        _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
         creds = get_credentials()
         if not creds.valid:
             creds.refresh(GoogleAuthRequest())
@@ -1033,10 +1035,27 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
     pdf_sheet, keys_sheet, pdf_rows, key_rows, drive_token = await asyncio.to_thread(_load)
     by_id = {(row + [""] * (22 - len(row)))[0]: (idx, row + [""] * (22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
     existing_key_ids = {r[0] for r in key_rows[1:] if r}
+
     pdf_updates, new_keys = [], []
-    verified_count = rejected_count = review_count = embedded_keys_parsed = 0
+    verified_count = rejected_count = review_count = embedded_keys_parsed = newly_discovered = 0
     now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
 
+    exam_cache = {}
+    ans_cache = {}
+
+    async def get_exam_analysis(doc_id, r):
+        if doc_id not in exam_cache:
+            b = await download_doc_bytes(drive_token, r[15], r[17])
+            exam_cache[doc_id] = await asyncio.to_thread(analyze_exam_pdf, b) if b else None
+        return exam_cache[doc_id]
+
+    async def get_ans_analysis(doc_id, r):
+        if doc_id not in ans_cache:
+            b = await download_doc_bytes(drive_token, r[15], r[17])
+            ans_cache[doc_id] = await asyncio.to_thread(analyze_answer_pdf, b) if b else None
+        return ans_cache[doc_id]
+
+    # 1. Verify existing filename-linked pairs
     for doc_id, (row_idx, r) in by_id.items():
         cat, linked_id, link_status = r[5], r[10], r[20]
         size_mb = float(r[13]) if r[13] else 0.0
@@ -1051,21 +1070,22 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 review_count += 1
                 continue
 
-            exam_bytes = await download_doc_bytes(drive_token, r[15], r[17])
-            ans_bytes = await download_doc_bytes(drive_token, ans_r[15], ans_r[17])
-            if not exam_bytes or not ans_bytes:
+            ex_info = await get_exam_analysis(doc_id, r)
+            ans_info = await get_ans_analysis(linked_id, ans_r)
+            if not ex_info or not ans_info:
                 continue
 
-            result = await asyncio.to_thread(verify_exam_answer_pair, exam_bytes, ans_bytes)
-            st = result["status"]
-            if st == "AUTO_VERIFIED":
+            result = score_exam_answer_match(ex_info, ans_info, same_round_hint=(r[8] == ans_r[8]))
+            if result["status"] == "AUTO_VERIFIED":
                 verified_count += 1
                 pdf_updates.extend([{"range": f"U{row_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_row_idx}", "values": [["AUTO_VERIFIED"]]}])
                 if result["answers"] and doc_id not in existing_key_ids:
                     new_keys.append([doc_id, result["total_q"], json.dumps(result["sections"]), json.dumps(result["answers"]), linked_id, now_str])
                     existing_key_ids.add(doc_id)
-            elif st == "REJECTED_MISMATCH":
+            elif result["status"] == "REJECTED_MISMATCH":
                 rejected_count += 1
+                r[10] = ""
+                ans_r[10] = ""
                 pdf_updates.extend([
                     {"range": f"K{row_idx}", "values": [[""]]}, {"range": f"K{ans_row_idx}", "values": [[""]]},
                     {"range": f"U{row_idx}", "values": [["REJECTED_MISMATCH"]]}, {"range": f"U{ans_row_idx}", "values": [["REJECTED_MISMATCH"]]},
@@ -1075,14 +1095,48 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
 
         elif r[11] == "Yes" and cat in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") and doc_id not in existing_key_ids and size_mb <= 25:
-            exam_bytes = await download_doc_bytes(drive_token, r[15], r[17])
-            if exam_bytes:
-                ex_info = await asyncio.to_thread(analyze_exam_pdf, exam_bytes)
+            ex_info = await get_exam_analysis(doc_id, r)
+            if ex_info:
                 emb = ex_info.get("embedded_answers") or {}
                 if len(emb) >= 15:
                     new_keys.append([doc_id, max(int(k) for k in emb.keys()), json.dumps(ex_info.get("sections", [])), json.dumps(emb), doc_id, now_str])
                     existing_key_ids.add(doc_id)
                     embedded_keys_parsed += 1
+
+    # 2. Smart Content Discovery for unlinked Answer Sheets (matches by Subject + internal PDF Year/Code/Qs)
+    for ans_id, (ans_idx, ans_r) in by_id.items():
+        if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
+            continue
+        ans_info = await get_ans_analysis(ans_id, ans_r)
+        if not ans_info or ans_info.get("is_scanned") or ans_info.get("looks_like_question_paper"):
+            continue
+
+        best_match = None
+        for ex_id, (ex_idx, ex_r) in by_id.items():
+            if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
+                continue
+            if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):  # Must match Subject
+                continue
+            ex_info = await get_exam_analysis(ex_id, ex_r)
+            if not ex_info:
+                continue
+            res = score_exam_answer_match(ex_info, ans_info, same_round_hint=(ex_r[8] == ans_r[8]))
+            if res["status"] == "AUTO_VERIFIED":
+                if not best_match or res["score"] > best_match[0]:
+                    best_match = (res["score"], ex_id, ex_idx, res)
+
+        if best_match:
+            _, ex_id, ex_idx, res = best_match
+            by_id[ex_id][1][10] = ans_id
+            ans_r[10] = ex_id
+            newly_discovered += 1
+            pdf_updates.extend([
+                {"range": f"K{ex_idx}", "values": [[ans_id]]}, {"range": f"K{ans_idx}", "values": [[ex_id]]},
+                {"range": f"U{ex_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_idx}", "values": [["AUTO_VERIFIED"]]},
+            ])
+            if res["answers"] and ex_id not in existing_key_ids:
+                new_keys.append([ex_id, res["total_q"], json.dumps(res["sections"]), json.dumps(res["answers"]), ans_id, now_str])
+                existing_key_ids.add(ex_id)
 
     def _save_results():
         if pdf_updates:
@@ -1096,7 +1150,8 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await status_msg.edit_text(
         f"✅ <b>PDF Content Verification Complete!</b>\n\n"
-        f"✔️ <b>Auto-Verified:</b> {verified_count} | ❌ <b>False Links Removed:</b> {rejected_count}\n"
+        f"✔️ <b>Auto-Verified:</b> {verified_count} (+{newly_discovered} newly matched by content!)\n"
+        f"❌ <b>False Links Removed:</b> {rejected_count}\n"
         f"🧐 <b>Needs Review:</b> {review_count} | 🎯 <b>Quiz Keys Parsed:</b> {len(new_keys)} ({embedded_keys_parsed} embedded)\n"
         f"{'Send /review_links to confirm scanned pairs.' if review_count else ''}",
         parse_mode="HTML",
