@@ -22,9 +22,7 @@ def is_excluded_file(filename: str) -> tuple[bool, str]:
 
 
 def normalize_stem(filename: str) -> str:
-    """Normalizes filename without extension/copy-numbers to pair .pptx/.docx with .pdf and spot duplicates."""
     stem = re.sub(r"\.(pdf|pptx|docx)$", "", filename.strip(), flags=re.IGNORECASE)
-    # Remove trailing copy markers like (1), (2), _compressed
     stem = re.sub(r"(_compressed|\s*\(\d+\))+$", "", stem, flags=re.IGNORECASE)
     stem = re.sub(r"\s*\(\d+\)", "", stem)
     stem = re.sub(r"[_\-\s]+", " ", stem).strip().lower()
@@ -32,7 +30,6 @@ def normalize_stem(filename: str) -> str:
 
 
 def extract_grade(text_lower: str) -> str:
-    # Multi-grade ranges first
     if re.search(r"(?:9\s*(?:-|to|and|,)\s*12|9\s*,\s*10\s*,\s*11\s*,\s*12)", text_lower):
         return "Grade 9-12"
     if re.search(r"(?:11\s*(?:&|and|-|to)\s*12)", text_lower):
@@ -42,7 +39,6 @@ def extract_grade(text_lower: str) -> str:
     if re.search(r"(?:10\s*(?:&|and|-|to)\s*11)", text_lower):
         return "Grade 10-11"
 
-    # Explicit single grades (handles G12, G-12, G.12, Grade 12, CHEM 11, etc.)
     explicit_patterns = [
         (r"(?:\bgrade|\bg)[.\-_\s]*12\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*12\b", "Grade 12"),
         (r"(?:\bgrade|\bg)[.\-_\s]*11\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*11\b", "Grade 11"),
@@ -60,18 +56,13 @@ def extract_grade(text_lower: str) -> str:
     if "freshman" in text_lower or "fresh man" in text_lower:
         return "Freshman"
 
-    # Implicit Grade 12 / Entrance materials
-    if re.search(
-        r"\b(?:euee|esslce|uee|matric|entrance|pilot|model|uat|astu|aastu|sat)\b",
-        text_lower,
-    ):
+    if re.search(r"\b(?:euee|esslce|uee|matric|entrance|pilot|model|uat|astu|aastu|sat)\b", text_lower):
         return "Grade 12"
 
     return "General"
 
 
 def extract_subject(original_text: str, text_lower: str) -> str:
-    # Check specific subjects first (order matters for e.g. "501-GMAT" vs "501-Synonym")
     if re.search(r"\b(?:bio|biology|genetics|enzymes|evolution)\b", text_lower):
         return "Biology"
     if re.search(r"\b(?:chem|chemistry|thermodynamics)\b|acid[\s\-_]*base|chemical\s+bonding", text_lower):
@@ -86,10 +77,7 @@ def extract_subject(original_text: str, text_lower: str) -> str:
         text_lower,
     ):
         return "Mathematics"
-    if re.search(
-        r"\b(?:aptitude|uat|sat|analogies|analogy|gmat|scholastic)\b",
-        text_lower,
-    ):
+    if re.search(r"\b(?:aptitude|uat|sat|analogies|analogy|gmat|scholastic)\b", text_lower):
         return "Aptitude (SAT)"
     if re.search(
         r"\b(?:eng|english|englsih|grammar|vocabulary|punctuation|tense|synonym|antonym)\b|"
@@ -130,16 +118,11 @@ def extract_stream(text_lower: str, subject: str) -> str:
 
 
 def extract_year(text_lower: str) -> str:
-    # Year ranges like 2000-2011, 1995-2014, 2012-13
     m_range = re.search(r"(?<![0-9])((?:199|20[0-2])\d)\s*[-–to_]+\s*((?:199|20[0-2])\d)(?![0-9])", text_lower)
     if m_range:
         return f"{m_range.group(1)}-{m_range.group(2)}"
-
     m_single = re.search(r"(?<![0-9])((?:199|20[0-2])\d)(?![0-9])", text_lower)
-    if m_single:
-        return m_single.group(1)
-
-    return ""
+    return m_single.group(1) if m_single else ""
 
 
 def extract_round_or_code(text_lower: str) -> str:
@@ -170,7 +153,6 @@ def extract_round_or_code(text_lower: str) -> str:
 
 def classify_material(filename: str, caption: str = "") -> dict:
     raw = f"{filename} {caption}".strip()
-    # Replace underscores, dots, slashes, brackets with spaces for cleaner word matching
     cleaned = re.sub(r"[_\[\]()@]+", " ", raw)
     cleaned_no_ext = re.sub(r"\.(pdf|pptx|docx)$", "", cleaned, flags=re.IGNORECASE)
     text_lower = cleaned_no_ext.lower()
@@ -182,13 +164,9 @@ def classify_material(filename: str, caption: str = "") -> dict:
     round_or_code = extract_round_or_code(text_lower)
 
     has_embedded = bool(
-        re.search(
-            r"with\s+answers?|with\s+solutions?|with\s+explanations?|solved\s+problems",
-            text_lower,
-        )
+        re.search(r"with\s+answers?|with\s+solutions?|with\s+explanations?|solved\s+problems", text_lower)
     )
 
-    # Category classification (strict priority order!)
     if re.search(
         r"related\s+(?:content|ontents)|common\s+related\s+chapters|common\s+chapters|matching\s+chapters|"
         r"entrance\s+exam\s+contents?|entrance\s+\w+\s+contents?|study\s+link|\blink\b|uee\s+analysis|"
@@ -198,8 +176,7 @@ def classify_material(filename: str, caption: str = "") -> dict:
         category = "Related Contents / Guide"
     elif re.search(
         r"study\s+plan|reading\s+plan|reading\s+program|preparation\s+challenge|reading\s+challenge|"
-        r"days?\s+challenge|study\s+schedule|study\s+program|academic\s+calendar|orientation|user\s+guide|information\s+by|"
-        r"\bfana\s+aptitude\b",
+        r"days?\s+challenge|study\s+schedule|study\s+program|academic\s+calendar|orientation|user\s+guide|information\s+by|\bfana\s+aptitude\b",
         text_lower,
     ):
         category = "Study Plan / Schedule"
@@ -237,17 +214,16 @@ def classify_material(filename: str, caption: str = "") -> dict:
     else:
         category = "Other"
 
-    # Determine Exam_Tag for linking Exams <-> Answer Sheets
     exam_tag = ""
-    if category in ("Pilot Exam",):
+    if category == "Pilot Exam":
         exam_tag = "Pilot"
-    elif category in ("Model Exam",):
+    elif category == "Model Exam":
         exam_tag = "Model"
-    elif category in ("Practice / Weekly Exam",):
+    elif category == "Practice / Weekly Exam":
         exam_tag = "Practice"
-    elif category in ("University Admission",):
+    elif category == "University Admission":
         exam_tag = "UAT"
-    elif category in ("Entrance Exam",):
+    elif category == "Entrance Exam":
         exam_tag = "Entrance"
     elif category == "Answer Sheet":
         if "pilot" in text_lower:
@@ -262,7 +238,6 @@ def classify_material(filename: str, caption: str = "") -> dict:
     if category == "Answer Sheet":
         has_embedded = True
 
-    # Build Link Keys for automatic Exam <-> Answer Sheet matching
     base_link_key = ""
     link_key = ""
     if exam_tag and subject != "General" and (category == "Answer Sheet" or not has_embedded):
