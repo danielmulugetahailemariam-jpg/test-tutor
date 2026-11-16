@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from urllib.parse import quote
 
 import httpx
 import gspread
@@ -26,12 +27,15 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
     filters,
 )
 
 from classifier import classify_material, is_excluded_file, normalize_stem
-from link_verifier import verify_exam_answer_pair, analyze_exam_pdf
+from link_verifier import (
+    analyze_exam_pdf,
+    analyze_answer_pdf,
+    score_exam_answer_match,
+)
 from receipt_generator import generate_membership_pdf
 from webapp_api import create_webapp_router
 
@@ -57,7 +61,15 @@ SCOPES = [
 REG_HEADERS = [
     "ID", "Name", "Grade", "Phone", "Status", "Timestamp", "Telegram_ID",
     "Approved_At", "Expires_On", "Months_Paid", "Last_Alert_Day", "Stream",
-    "Referral_Code", "Referred_By", "Referral_Count",
+    "Referral_Code", "Referred_By", "Referral_Count", "Role", "Format", "Lang",
+]
+STUDENTS_HEADERS = [
+    "Student_ID", "Student_Name", "Grade", "Stream", "Format",
+    "Parent_TG_ID", "Child_TG_ID", "Child_Contact", "Link_Token", "Sibling_Discount", "Created_At",
+]
+REPORTS_HEADERS = [
+    "Report_ID", "Student_ID", "Period", "Attendance", "Scores_Text",
+    "Improved_Note", "Focus_Note", "Approval_Status", "Published_At", "Tutor_Name",
 ]
 PDF_HEADERS = [
     "Doc_ID", "File_Name", "Grade", "Stream", "Subject", "Category",
@@ -72,9 +84,11 @@ CONFIG_HEADERS = ["Key", "Value"]
 PROGRESS_HEADERS = ["Telegram_ID", "Bookmarks_JSON", "Last_Read_JSON", "Plan_Progress_JSON", "Custom_Plan_JSON", "Updated_At"]
 
 DEFAULT_CONFIG = {
-    "LAUNCH_MODE": "OPEN_LAUNCH",  # OPEN_LAUNCH (unlimited free) | PAID_GATED (trial for NEW/LEFT)
+    "LAUNCH_MODE": "OPEN_LAUNCH",
     "MATRIC_DATE": "2027-06-25",
-    "MINISTRY_DATE": "2027-06-15",
+    "GRADE8_MINISTRY_DATE": "2027-06-15",
+    "GRADE6_MINISTRY_DATE": "2027-06-10",
+    "SEMESTER_DATE": "2027-01-25",
 }
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -131,12 +145,14 @@ def get_all_worksheets():
     analytics_sheet = get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
     config_sheet = get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
     progress_sheet = get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
-    return reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, config_sheet, progress_sheet
+    students_sheet = get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
+    reports_sheet = get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
+    return reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, config_sheet, progress_sheet, students_sheet, reports_sheet
 
 
 def get_config_dict(config_sheet=None) -> dict:
     if config_sheet is None:
-        _, _, _, _, config_sheet, _ = get_all_worksheets()
+        _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
     rows = config_sheet.get_all_values()[1:]
     cfg = dict(DEFAULT_CONFIG)
     for r in rows:
@@ -146,7 +162,7 @@ def get_config_dict(config_sheet=None) -> dict:
 
 
 def set_config_value(key: str, value: str):
-    _, _, _, _, config_sheet, _ = get_all_worksheets()
+    _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
     rows = config_sheet.get_all_values()
     for idx, r in enumerate(rows[1:], start=2):
         if r and r[0].strip() == key:
@@ -159,10 +175,11 @@ def get_drive_service():
     return build("drive", "v3", credentials=get_credentials(), cache_discovery=False)
 
 
-def library_keyboard(label="📚 Open Study Library"):
+def webapp_keyboard(label: str, ref_code: str = ""):
     if not WEBAPP_URL:
         return None
-    return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(url=WEBAPP_URL))]])
+    target_url = f"{WEBAPP_URL}?ref={quote(ref_code)}" if ref_code else WEBAPP_URL
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(url=target_url))]])
 
 
 def referral_invite_url(ref_code: str) -> str:
@@ -171,50 +188,102 @@ def referral_invite_url(ref_code: str) -> str:
     return ""
 
 
-NAME, GRADE, STREAM, PHONE, REFERRAL = range(5)
-
-
 # ==============================================================================
-# 1. REGISTRATION (GRADES 1-12 + STREAM + REFERRAL PROGRAM)
+# 1. BILINGUAL /START LAUNCHER, CHILD LINKING & REFERRAL COMMAND
 # ==============================================================================
 def find_registration_by_tg_id(reg_sheet, tg_id: int):
-    rows = reg_sheet.get_all_values()
-    for idx, row in enumerate(rows[1:], start=2):
-        r = row + [""] * (15 - len(row))
+    for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+        r = row + [""] * (18 - len(row))
         if str(r[6]).strip() == str(tg_id):
             return idx, r
     return None
 
 
-async def open_library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    arg = context.args[0].strip() if context.args else ""
 
-    def _check():
-        reg_sheet, _, _, _, cfg_sheet, _ = get_all_worksheets()
-        return find_registration_by_tg_id(reg_sheet, user_id), get_config_dict(cfg_sheet).get("LAUNCH_MODE", "OPEN_LAUNCH")
+    if arg.startswith("child_"):
+        def _link_child():
+            reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
+            for idx, row in enumerate(students_sheet.get_all_values()[1:], start=2):
+                s = row + [""] * (11 - len(row))
+                if s[8].strip() == arg:
+                    students_sheet.update_cell(idx, 7, str(user_id))
+                    if not find_registration_by_tg_id(reg_sheet, user_id):
+                        all_regs = reg_sheet.get_all_values()
+                        my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                        ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+                        reg_sheet.append_row([
+                            max(1, len(all_regs)), s[1], s[2], "", "APPROVED", ts, str(user_id),
+                            "", "", "0", "-1", s[3], my_code, "", "0", "student", s[4], "en",
+                        ])
+                    return s[1], s[2]
+            return None
 
-    existing, launch_mode = await asyncio.to_thread(_check)
-    status = existing[1][4].strip().upper() if existing else ("APPROVED" if user_id == ADMIN_USER_ID else "NOT_REGISTERED")
+        linked = await asyncio.to_thread(_link_child)
+        webapp_router.invalidate_reg_cache()
+        if linked:
+            c_name, c_grade = linked
+            await update.message.reply_text(
+                f"✅ <b>Account Linked Successfully! | አካውንቱ ተገናኝቷል!</b>\n\n"
+                f"👋 Welcome <b>{html.escape(c_name)}</b> ({html.escape(c_grade)})!\n"
+                f"Tap below to open your Library, Quizzes &amp; Study Plans!\n\n"
+                f"የቀላል የጥናት ማዕከል አካውንትዎ ተከፍቷል። ከታች ያለውን ቁልፍ ተጭነው ይጠቀሙ!",
+                reply_markup=webapp_keyboard("🚀 Open My Study Hub | ክፈት"),
+                parse_mode="HTML",
+            )
+            return
 
-    if status == "NOT_REGISTERED":
-        await update.message.reply_text("📝 Please register first by sending /start.")
-        return
-    if not WEBAPP_URL:
-        await update.message.reply_text("⚠️ Web App URL is not configured yet.")
-        return
+    ref_param = arg[4:].upper() if arg.startswith("ref_") else ""
 
-    if launch_mode == "OPEN_LAUNCH" or status in ("APPROVED", "EXPIRED") or user_id == ADMIN_USER_ID:
-        msg = "📚 Tap below to open the full <b>Study Library, Quiz Me & Study Plans</b>:"
-        btn_label = "📚 Open Study Library"
-    else:
-        msg = (
-            "🎁 <b>Trial Preview Ready!</b>\n\n"
-            "Your account currently has <b>3 preview books</b> for your grade, a limited Study Plan, and sample Quizzes.\n"
-            "300+ more exams, textbooks, and full quizzes unlock once your registration is approved!"
+    def _check_existing():
+        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
+        reg = find_registration_by_tg_id(reg_sheet, user_id)
+        child_match = None
+        for r in students_sheet.get_all_values()[1:]:
+            if len(r) >= 7 and r[6].strip() == str(user_id):
+                child_match = r
+                break
+        return reg, child_match
+
+    existing_reg, child_match = await asyncio.to_thread(_check_existing)
+
+    if existing_reg or child_match:
+        name = existing_reg[1][1] if existing_reg else child_match[1]
+        await update.message.reply_text(
+            f"👋 <b>Welcome back, {html.escape(name)}! | እንኳን ደህና መጡ!</b>\n\n"
+            f"Tap below to open your <b>Qelal Learning (ቀላል)</b> Library, Interactive Quizzes, Study Plans &amp; Progress Dashboard.\n\n"
+            f"📞 Need help? Call: <code>+251 933 510 682</code> / <code>+251 988 666 328</code>",
+            reply_markup=webapp_keyboard("🚀 Open Qelal Hub • ቀላልን ክፈት"),
+            parse_mode="HTML",
         )
-        btn_label = "🎁 Open Trial Library"
+        return
 
-    await update.message.reply_text(msg, reply_markup=library_keyboard(btn_label), parse_mode="HTML")
+    ref_line = f"\n🎁 <b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n" if ref_param else ""
+    welcome_msg = (
+        f"✨ <b>QELAL LEARNING (ቀላል) — Bishoftu Study &amp; Exam Hub</b>\n"
+        f"<i>Effortless Exam Prep. Zero Clutter. Built for Grades 1–12.</i>\n"
+        f"{ref_line}\n"
+        f"🇬🇧 <b>English:</b>\n"
+        f"Prepare smarter for <b>Grade 6 &amp; 8 Ministry</b>, <b>Grade 12 ESSLCE (Matric)</b>, and school exams with <b>400+ organized textbooks &amp; past papers</b>, <b>auto-graded bubble-sheet quizzes</b>, <b>personalized study plans</b>, and <b>bi-weekly parent progress reports</b> (with <b>sibling discounts</b> for 2+ children!).\n\n"
+        f"🇪🇹 <b>አማርኛ:</b>\n"
+        f"ከ1ኛ–12ኛ ክፍል (ለ6ኛ፣ 8ኛ ሚኒስትሪ እና ለ12ኛ ክፍል ብሔራዊ ፈተና) የሚያዘጋጁ <b>400+ መጽሐፍትና ያለፉ ፈተናዎች</b>፣ <b>ውጤት ወዲያውኑ የሚያሳዩ ጥያቄዎች</b>፣ <b>የጥናት እቅዶች</b> እና <b>ለወላጆች የልጆች ውጤት መከታተያ</b> በአንድ ቦታ!\n\n"
+        f"👉 <b>How to Register | እንዴት መመዝገብ ይችላሉ:</b>\n"
+        f"1️⃣ <b>Online (60 Seconds):</b> Tap below to choose <b>English / አማርኛ</b> and register inside the Mini App.\n"
+        f"2️⃣ <b>Call Us Directly | በስልክ ይደውሉ:</b>\n"
+        f"📞 <code>+251 933 510 682</code>\n"
+        f"📞 <code>+251 988 666 328</code>"
+    )
+    await update.message.reply_text(
+        welcome_msg,
+        reply_markup=webapp_keyboard("🚀 Launch Qelal Mini App • መተግበሪያውን ክፈት", ref_code=ref_param),
+        parse_mode="HTML",
+    )
+
+
+async def open_library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_command(update, context)
 
 
 async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,255 +304,29 @@ async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     res = await asyncio.to_thread(_get_or_create_code)
     if not res:
-        await update.message.reply_text("📝 Please register first with /start to get your Referral Code!")
+        await update.message.reply_text(
+            "📝 Please launch the Mini App via /start to register and get your Referral Code!\n"
+            "እባክዎ መጀመሪያ /start በመጫን ይመዝገቡ።",
+            reply_markup=webapp_keyboard("🚀 Register in Mini App • ተመዝገብ"),
+        )
         return
 
     name, code, count = res
     link = referral_invite_url(code)
-    share_text = f"Join me at Qelal / Bishoftu Tutoring Hub for Grades 1-12 Exam Prep, Notes & Quizzes! Use my code: {code}"
-    share_url = f"https://t.me/share/url?url={link}&text={share_text}" if link else ""
-
+    share_text = f"Join me at Qelal Learning (Bishoftu) for Grades 1-12 Exam Prep & Quizzes! Use my code: {code}"
+    share_url = f"https://t.me/share/url?url={quote(link)}&text={quote(share_text)}" if link else ""
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Share Invite on Telegram", url=share_url)]]) if share_url else None
+
     await update.message.reply_text(
-        f"🎁 <b>Your Study Squad Referral Program</b>\n\n"
-        f"👤 <b>Student:</b> {html.escape(name)}\n"
+        f"🎁 <b>Study Squad Referral Program | የግብዣ ፕሮግራም</b>\n\n"
+        f"👤 <b>Name:</b> {html.escape(name)}\n"
         f"🔑 <b>Your Code:</b> <code>{code}</code>\n"
         f"🤝 <b>Verified Referrals:</b> <b>{count}</b> friend(s)\n"
-        f"{f'🔗 <b>Your Invite Link:</b> {link}' if link else ''}\n\n"
-        f"💡 <i>Invite 2 friends (or register siblings) to unlock Study Squad same-table seating, formula folders & monthly tuition perks!</i>",
+        f"{f'🔗 <b>Invite Link:</b> {link}' if link else ''}\n\n"
+        f"💡 <i>Invite 2 friends for Study Squad seating, bound formula folders &amp; tuition perks!</i>",
         reply_markup=kb,
         parse_mode="HTML",
     )
-
-
-async def start_register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if context.args and context.args[0].startswith("ref_"):
-        context.user_data["referred_by"] = context.args[0][4:].strip().upper()
-    else:
-        context.user_data.pop("referred_by", None)
-
-    def _check():
-        reg_sheet, _, _, _, cfg_sheet, _ = get_all_worksheets()
-        return find_registration_by_tg_id(reg_sheet, user_id), get_config_dict(cfg_sheet).get("LAUNCH_MODE", "OPEN_LAUNCH")
-
-    existing, launch_mode = await asyncio.to_thread(_check)
-    if existing:
-        _, r = existing
-        name, status = r[1], r[4].strip().upper() or "NEW"
-        safe_name = html.escape(name)
-        if launch_mode == "OPEN_LAUNCH":
-            await update.message.reply_text(
-                f"👋 Welcome back, <b>{safe_name}</b>!\n\n🎉 Launch Phase Free Access is active — enjoy unlimited access to the full Study Library & Quizzes:",
-                reply_markup=library_keyboard(),
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
-        if status in ("APPROVED", "EXPIRED"):
-            await update.message.reply_text(
-                f"👋 Welcome back, <b>{safe_name}</b>!\n\n✅ Your library access is active.",
-                reply_markup=library_keyboard(),
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
-        elif status == "NEW":
-            await update.message.reply_text(
-                f"⏳ Hi <b>{safe_name}</b>, our representative will call you soon to finish your registration.\n\n"
-                f"Meanwhile, explore your <b>3 free grade books</b>, sample Study Plan & Quizzes:",
-                reply_markup=library_keyboard("🎁 Open Trial Library"),
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
-        elif status == "LEFT":
-            await update.message.reply_text(
-                f"👋 Hi <b>{safe_name}</b>, your monthly tutoring pass has ended.\n"
-                f"You currently have Trial access (3 books + sample quizzes). Contact us to renew anytime!",
-                reply_markup=library_keyboard("🎁 Open Trial Library"),
-                parse_mode="HTML",
-            )
-            return ConversationHandler.END
-
-    ref_note = f"\n🎁 Referral code detected: <code>{html.escape(context.user_data['referred_by'])}</code>\n" if context.user_data.get("referred_by") else ""
-    await update.message.reply_text(
-        f"📚 <b>Qelal Learning / Bishoftu Tutoring Hub</b>\n{ref_note}\n"
-        f"Let's reserve your seat and unlock the Study Library in 60 seconds.\n\n"
-        f"Please enter the <b>Student's Full Name</b>:",
-        parse_mode="HTML",
-    )
-    return NAME
-
-
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text.strip()
-    keyboard = [
-        [InlineKeyboardButton("Grade 1", callback_data="g:Grade 1"), InlineKeyboardButton("Grade 2", callback_data="g:Grade 2"), InlineKeyboardButton("Grade 3", callback_data="g:Grade 3")],
-        [InlineKeyboardButton("Grade 4", callback_data="g:Grade 4"), InlineKeyboardButton("Grade 5", callback_data="g:Grade 5"), InlineKeyboardButton("Grade 6 🎯", callback_data="g:Grade 6")],
-        [InlineKeyboardButton("Grade 7", callback_data="g:Grade 7"), InlineKeyboardButton("Grade 8 🎯", callback_data="g:Grade 8"), InlineKeyboardButton("Grade 9", callback_data="g:Grade 9")],
-        [InlineKeyboardButton("Grade 10", callback_data="g:Grade 10"), InlineKeyboardButton("Grade 11", callback_data="g:Grade 11"), InlineKeyboardButton("Grade 12 🎯", callback_data="g:Grade 12")],
-    ]
-    await update.message.reply_text(
-        "Select the student's <b>Grade Level</b> (🎯 = National Exam Prep):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML",
-    )
-    return GRADE
-
-
-async def get_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    grade = query.data.split(":", 1)[1]
-    context.user_data["grade"] = grade
-
-    if grade in ("Grade 11", "Grade 12"):
-        kb = [[
-            InlineKeyboardButton("🔬 Natural Science", callback_data="stream:Natural"),
-            InlineKeyboardButton("🌍 Social Science", callback_data="stream:Social"),
-        ]]
-        await query.edit_message_text(f"Selected: <b>{grade}</b>\n\nWhich <b>Stream</b>?", reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
-        return STREAM
-
-    context.user_data["stream"] = "General"
-    await query.edit_message_text(f"Selected: <b>{grade}</b>\n\nNow enter an active <b>Phone Number</b> (Parent or Student):", parse_mode="HTML")
-    return PHONE
-
-
-async def get_stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    stream = query.data.split(":", 1)[1]
-    context.user_data["stream"] = stream
-    await query.edit_message_text(
-        f"Selected: <b>{context.user_data['grade']} ({stream})</b>\n\nNow enter an active <b>Phone Number</b> (Parent or Student):",
-        parse_mode="HTML",
-    )
-    return PHONE
-
-
-async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["phone"] = update.message.text.strip()
-    if context.user_data.get("referred_by"):
-        return await finalize_registration(update.message, update.effective_user.id, context)
-
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip (No Referral Code)", callback_data="skip_ref")]])
-    await update.message.reply_text(
-        "🎁 Have a friend's <b>Referral Code</b> (e.g. <code>QELAL-1A2B3</code>)?\n"
-        "Type it below, or tap <b>Skip</b>:",
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
-    return REFERRAL
-
-
-async def skip_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["referred_by"] = ""
-    await query.edit_message_text("✅ Finalizing your registration...")
-    return await finalize_registration(query.message, query.from_user.id, context)
-
-
-async def get_referral_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    entered = update.message.text.strip().upper()
-    user_id = update.effective_user.id
-
-    def _validate_code():
-        reg_sheet, _ = get_sheets()
-        for row in reg_sheet.get_all_values()[1:]:
-            r = row + [""] * (15 - len(row))
-            if r[12].strip().upper() == entered and r[6].strip() != str(user_id):
-                return r[1]
-        return None
-
-    referrer_name = await asyncio.to_thread(_validate_code)
-    if not referrer_name:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip (No Referral Code)", callback_data="skip_ref")]])
-        await update.message.reply_text(
-            "⚠️ That referral code wasn't found. Double-check the spelling or tap <b>Skip</b>:",
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
-        return REFERRAL
-
-    context.user_data["referred_by"] = entered
-    await update.message.reply_text(f"🎉 Referral code applied (invited by <b>{html.escape(referrer_name)}</b>)!", parse_mode="HTML")
-    return await finalize_registration(update.message, user_id, context)
-
-
-async def finalize_registration(message_target, tg_id: int, context: ContextTypes.DEFAULT_TYPE):
-    name = context.user_data["name"]
-    grade = context.user_data["grade"]
-    stream = context.user_data.get("stream", "General")
-    phone = context.user_data["phone"]
-    referred_by = context.user_data.get("referred_by", "")
-    my_ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-    timestamp = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
-
-    def _save():
-        reg_sheet, _, _, _, cfg_sheet, _ = get_all_worksheets()
-        all_rows = reg_sheet.get_all_values()
-        next_id = max(1, len(all_rows))
-        reg_sheet.append_row([
-            next_id, name, grade, phone, "NEW", timestamp, str(tg_id),
-            "", "", "0", "-1", stream, my_ref_code, referred_by, "0",
-        ])
-        return get_config_dict(cfg_sheet).get("LAUNCH_MODE", "OPEN_LAUNCH")
-
-    launch_mode = await asyncio.to_thread(_save)
-    webapp_router.invalidate_reg_cache()
-
-    safe_name = html.escape(name)
-    safe_grade = html.escape(f"{grade} ({stream})" if stream != "General" else grade)
-    safe_phone = html.escape(phone)
-    inv_link = referral_invite_url(my_ref_code)
-
-    if launch_mode == "OPEN_LAUNCH":
-        msg = (
-            f"✅ <b>Seat Pre-Registration Confirmed!</b>\n\n"
-            f"👤 <b>Name:</b> {safe_name}\n"
-            f"🏫 <b>Grade:</b> {safe_grade}\n"
-            f"📞 <b>Phone:</b> {safe_phone}\n"
-            f"🔑 <b>Your Referral Code:</b> <code>{my_ref_code}</code>\n\n"
-            f"🎉 <b>Launch Gift:</b> Unlimited free access to the Study Library, Study Plans & Quizzes is unlocked right now!\n"
-            f"{f'🎁 Invite 2 friends with {inv_link} for Study Squad perks!' if inv_link else ''}"
-        )
-        btn_label = "📚 Open Full Study Library"
-    else:
-        msg = (
-            f"✅ <b>Pre-Registration Received!</b>\n\n"
-            f"👤 <b>Name:</b> {safe_name}\n"
-            f"🏫 <b>Grade:</b> {safe_grade}\n"
-            f"📞 <b>Phone:</b> {safe_phone}\n"
-            f"🔑 <b>Your Referral Code:</b> <code>{my_ref_code}</code>\n\n"
-            f"📞 <b>Next Step:</b> Our representative will call you to finish registration & payment, then unlock all 300+ library resources.\n\n"
-            f"🎁 Meanwhile, try your <b>3 Free Grade Books</b>, sample Study Plan & Quizzes below:"
-        )
-        btn_label = "🎁 Open Trial Library"
-
-    await message_target.reply_text(msg, reply_markup=library_keyboard(btn_label), parse_mode="HTML")
-
-    keyboard = [[
-        InlineKeyboardButton("✅ Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"reject_user:{tg_id}"),
-    ]]
-    await context.bot.send_message(
-        chat_id=ADMIN_USER_ID,
-        text=(
-            f"🚨 <b>NEW REGISTRATION!</b>\n"
-            f"👤 {safe_name} ({safe_grade})\n"
-            f"📞 <code>{safe_phone}</code>\n"
-            f"🆔 <code>{tg_id}</code> | 🔑 <code>{my_ref_code}</code>"
-            f"{f' | 🤝 Referred by: <code>{html.escape(referred_by)}</code>' if referred_by else ''}"
-        ),
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML",
-    )
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Registration cancelled.")
-    return ConversationHandler.END
 
 
 # ==============================================================================
@@ -503,8 +346,8 @@ async def end_launch_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]])
     await update.message.reply_text(
         "⚠️ <b>Confirm Ending Launch Phase?</b>\n\n"
-        "• Only <b>APPROVED</b> (and 7-day grace <b>EXPIRED</b>) students keep unlimited access.\n"
-        "• All <b>NEW</b> and <b>LEFT</b> students switch to <b>Trial Mode</b> (3 grade books + limited Study Plan + 10-Q Quiz preview).",
+        "• Only <b>APPROVED</b> (and 7-day grace <b>EXPIRED</b>) users keep unlimited access.\n"
+        "• All <b>NEW</b> and <b>LEFT</b> users switch to <b>Trial Mode</b> (3 grade books + limited Study Plan + 10-Q Quiz preview).",
         reply_markup=kb,
         parse_mode="HTML",
     )
@@ -515,7 +358,7 @@ async def reopen_launch_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "OPEN_LAUNCH")
     webapp_router.invalidate_config_cache()
-    await update.message.reply_text("🎉 Reopened <b>OPEN_LAUNCH</b> mode (all registered students have unlimited free access).", parse_mode="HTML")
+    await update.message.reply_text("🎉 Reopened <b>OPEN_LAUNCH</b> mode (all registered users have unlimited free access).", parse_mode="HTML")
 
 
 async def launch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -530,11 +373,11 @@ async def launch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "PAID_GATED")
     webapp_router.invalidate_config_cache()
-    await query.edit_message_text("🔒 <b>Launch Phase Ended!</b> Only approved students now get unlimited access.", parse_mode="HTML")
+    await query.edit_message_text("🔒 <b>Launch Phase Ended!</b> Only approved/paid members now get unlimited access.", parse_mode="HTML")
 
 
 # ==============================================================================
-# 3. ADMIN APPROVALS, REFERRAL CREDITS, RENEWALS & PDF PASSES
+# 3. ADMIN APPROVALS, REFERRALS, RENEWALS & PDF PASSES
 # ==============================================================================
 async def send_student_pass_pdf(bot, student_row: list[str], months_paid: int, approved_at: str, expires_on: str, is_renewal: bool):
     tg_id = int(student_row[6].strip())
@@ -548,26 +391,28 @@ async def send_student_pass_pdf(bot, student_row: list[str], months_paid: int, a
     )
     filename = f"Qelal_Pass_{student_row[1].replace(' ', '_')}_M{months_paid}.pdf"
     caption = (
-        f"🎉 <b>{'Monthly Renewal Confirmed!' if is_renewal else 'Welcome! Registration Approved!'}</b>\n\n"
-        f"📄 Attached is your official Study Pass & Receipt (Valid until <b>{expires_on}</b>).\n"
-        f"📚 Tap below to unlock all 300+ exams, textbooks & full quizzes:"
+        f"🎉 <b>{'Monthly Renewal Confirmed!' if is_renewal else 'Registration Approved! | ምዝገባዎ ጸድቋል!'}</b>\n\n"
+        f"📄 Attached is your official Qelal Pass &amp; Receipt (Valid until <b>{expires_on}</b>).\n"
+        f"📚 Tap below to unlock all 400+ books, exams &amp; full quizzes!"
     )
-    await bot.send_document(chat_id=tg_id, document=pdf_buf, filename=filename, caption=caption, reply_markup=library_keyboard(), parse_mode="HTML")
+    await bot.send_document(
+        chat_id=tg_id, document=pdf_buf, filename=filename, caption=caption,
+        reply_markup=webapp_keyboard("🚀 Open Qelal Hub • ክፈት"), parse_mode="HTML",
+    )
 
 
 def credit_referrer_if_first_approval(reg_sheet, all_rows: list[list[str]], student_row: list[str]):
-    """Credits +1 verified referral to the referrer ONLY on a student's first approval."""
     months_prev = int(student_row[9]) if len(student_row) > 9 and student_row[9].isdigit() else 0
     referred_by = student_row[13].strip().upper() if len(student_row) > 13 else ""
     if months_prev > 0 or not referred_by:
         return None
 
     for idx, row in enumerate(all_rows[1:], start=2):
-        r = row + [""] * (15 - len(row))
+        r = row + [""] * (18 - len(row))
         if r[12].strip().upper() == referred_by and r[6].strip() != student_row[6].strip():
             new_cnt = (int(r[14]) if r[14].isdigit() else 0) + 1
             r[14] = str(new_cnt)
-            all_rows[idx - 1] = r  # Keep in-memory copy synced during batch approve_all
+            all_rows[idx - 1] = r
             reg_sheet.update_cell(idx, 15, str(new_cnt))
             return int(r[6].strip()), r[1], referred_by, new_cnt, student_row[1]
     return None
@@ -576,20 +421,19 @@ def credit_referrer_if_first_approval(reg_sheet, all_rows: list[list[str]], stud
 async def notify_referrer(bot, credit_info):
     if not credit_info:
         return
-    ref_tg_id, ref_name, code, new_cnt, friend_name = credit_info
+    ref_tg_id, _, code, new_cnt, friend_name = credit_info
     try:
         await bot.send_message(
             chat_id=ref_tg_id,
             text=(
-                f"🎉 <b>Referral Reward Unlocked!</b>\n\n"
-                f"Your friend <b>{html.escape(friend_name)}</b> just got approved using your code <code>{code}</code>!\n"
-                f"🤝 <b>Total Verified Referrals:</b> <b>{new_cnt}</b>\n\n"
-                f"{'🌟 You hit 2+ referrals — Study Squad perks unlocked!' if new_cnt >= 2 else 'Invite 1 more friend for Study Squad perks!'}"
+                f"🎉 <b>Referral Reward Credited!</b>\n\n"
+                f"<b>{html.escape(friend_name)}</b> was just approved using your code <code>{code}</code>!\n"
+                f"🤝 <b>Verified Referrals:</b> <b>{new_cnt}</b>"
             ),
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.warning(f"Failed to notify referrer {ref_tg_id}: {e}")
+        logger.warning(f"Failed notifying referrer {ref_tg_id}: {e}")
 
 
 async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -609,9 +453,9 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"🔔 <b>PENDING REGISTRATIONS ({len(new_leads)}):</b>\n\n"
     buttons = []
     for row in new_leads:
-        r = row + [""] * (15 - len(row))
-        grade = f"{r[2]} ({r[11]})" if r[11] and r[11] != "General" else r[2]
-        msg += f"• <b>{html.escape(r[1])}</b> | {html.escape(grade)} | <code>{html.escape(r[3])}</code>\n"
+        r = row + [""] * (18 - len(row))
+        role_tag = "👨‍👩‍👧 Parent" if r[15] == "parent" else "🎓 Student"
+        msg += f"• {role_tag} <b>{html.escape(r[1])}</b> | {html.escape(r[2])} | <code>{html.escape(r[3])}</code>\n"
         if r[6].strip():
             buttons.append([InlineKeyboardButton(f"✅ Approve {r[1]}", callback_data=f"approve_user:{r[6].strip()}")])
 
@@ -626,7 +470,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
         return
 
     data = query.data
-    await query.answer("Updating student record...")
+    await query.answer("Updating record...")
     today = datetime.now(EAT_TZ).date()
 
     if data == "approve_all_new":
@@ -637,12 +481,16 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
             expires_str = (today + timedelta(days=30)).isoformat()
             today_str = today.isoformat()
             for idx, row in enumerate(rows[1:], start=2):
-                r = row + [""] * (15 - len(row))
+                r = row + [""] * (18 - len(row))
                 if r[4].strip().upper() == "NEW" and r[6].strip():
                     ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
                     updates.append({
-                        "range": f"E{idx}:O{idx}",
-                        "values": [["APPROVED", r[5], r[6], today_str, expires_str, "1", "0", r[11] or "General", ref_code, r[13], r[14] or "0"]],
+                        "range": f"E{idx}:R{idx}",
+                        "values": [[
+                            "APPROVED", r[5], r[6], today_str, expires_str, "1", "0",
+                            r[11] or "General", ref_code, r[13], r[14] or "0",
+                            r[15] or "student", r[16] or "Weekend Hub", r[17] or "en",
+                        ]],
                     })
                     r[12] = ref_code
                     approved_students.append((r, 1, today_str, expires_str))
@@ -660,11 +508,11 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
             try:
                 await send_student_pass_pdf(context.bot, row, months, app_at, exp_on, is_renewal=False)
             except Exception as e:
-                logger.warning(f"Failed sending pass PDF to {row[6]}: {e}")
+                logger.warning(f"Pass PDF send failed for {row[6]}: {e}")
         for ci in ref_credits:
             await notify_referrer(context.bot, ci)
 
-        await query.edit_message_text(f"✅ Approved <b>{len(approved_list)}</b> student(s) and sent PDF passes!", parse_mode="HTML")
+        await query.edit_message_text(f"✅ Approved <b>{len(approved_list)}</b> account(s) and sent PDF passes!", parse_mode="HTML")
         return
 
     action, tg_id_str = data.split(":", 1)
@@ -676,7 +524,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
             reg_sheet, _ = get_sheets()
             rows = reg_sheet.get_all_values()
             for idx, row in enumerate(rows[1:], start=2):
-                r = row + [""] * (15 - len(row))
+                r = row + [""] * (18 - len(row))
                 if r[6].strip() == tg_id_str:
                     prev_months = int(r[9]) if r[9].isdigit() else 0
                     new_months = prev_months + 1
@@ -692,8 +540,12 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
                     exp_str = new_expires.isoformat()
                     ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
                     reg_sheet.update(
-                        values=[["APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0", r[11] or "General", ref_code, r[13], r[14] or "0"]],
-                        range_name=f"E{idx}:O{idx}",
+                        values=[[
+                            "APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0",
+                            r[11] or "General", ref_code, r[13], r[14] or "0",
+                            r[15] or "student", r[16] or "Weekend Hub", r[17] or "en",
+                        ]],
+                        range_name=f"E{idx}:R{idx}",
                     )
                     r[12] = ref_code
                     c_info = credit_referrer_if_first_approval(reg_sheet, rows, r)
@@ -703,7 +555,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
         res = await asyncio.to_thread(_activate_or_renew)
         webapp_router.invalidate_reg_cache()
         if not res:
-            await query.edit_message_text("⚠️ Student not found in Google Sheet.")
+            await query.edit_message_text("⚠️ Record not found in Google Sheet.")
             return
 
         r, months, issue_date, exp_str, c_info = res
@@ -725,8 +577,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
 
         def _set_status():
             reg_sheet, _ = get_sheets()
-            rows = reg_sheet.get_all_values()
-            for idx, row in enumerate(rows[1:], start=2):
+            for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
                 if len(row) >= 7 and row[6].strip() == tg_id_str:
                     reg_sheet.update_cell(idx, 5, new_status)
                     return row[1]
@@ -739,7 +590,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
                 try:
                     await context.bot.send_message(
                         chat_id=int(tg_id_str),
-                        text="ℹ️ Your monthly tutoring plan has ended. Your account is now in Trial mode (3 grade books) until renewed.",
+                        text="ℹ️ Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.",
                     )
                 except Exception:
                     pass
@@ -747,17 +598,124 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
 
 
 # ==============================================================================
-# 4. AUTOMATED 30-DAY BILLING CHECKER & GRACE PERIOD ALERTS
+# 4. PARENT PROGRESS REPORT ADMIN APPROVAL GATE (/review_reports)
+# ==============================================================================
+async def review_reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    def _fetch():
+        _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
+        stu_map = {}
+        for row in students_sheet.get_all_values()[1:]:
+            s = row + [""] * (11 - len(row))
+            if s[0]:
+                stu_map[s[0]] = s
+        pending = []
+        for idx, row in enumerate(reports_sheet.get_all_values()[1:], start=2):
+            rp = row + [""] * (10 - len(row))
+            if rp[7].strip() == "Pending_Admin":
+                pending.append((idx, rp, stu_map.get(rp[1])))
+        return pending[:5]
+
+    pending = await asyncio.to_thread(_fetch)
+    if not pending:
+        await update.message.reply_text("✅ All progress reports reviewed! No Pending_Admin rows.")
+        return
+
+    for row_idx, rp, stu in pending:
+        s_name = stu[1] if stu else rp[1]
+        s_grade = stu[2] if stu else ""
+        p_tg = stu[5] if stu else "Not Linked"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve & Send", callback_data=f"rpt_approve:{row_idx}"),
+            InlineKeyboardButton("⏸ Hold", callback_data=f"rpt_hold:{row_idx}"),
+            InlineKeyboardButton("❌ Skip", callback_data=f"rpt_skip:{row_idx}"),
+        ]])
+        await update.message.reply_text(
+            f"📋 <b>APPROVE PROGRESS REPORT?</b>\n"
+            f"👤 <b>Student:</b> {html.escape(s_name)} ({html.escape(s_grade)})\n"
+            f"🗓 <b>Period:</b> {html.escape(rp[2])} | 👨‍🏫 {html.escape(rp[9] or 'Tutor')}\n"
+            f"✅ <b>Attendance:</b> {html.escape(rp[3])}\n"
+            f"📊 <b>Scores:</b> {html.escape(rp[4])}\n"
+            f"🔼 <b>Improved:</b> {html.escape(rp[5])}\n"
+            f"🎯 <b>Next Focus:</b> {html.escape(rp[6])}\n"
+            f"👨‍👩‍👧 <b>Parent TG:</b> <code>{p_tg}</code>",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+
+
+async def handle_report_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+    await query.answer()
+
+    action, row_idx_str = query.data.split(":", 1)
+    row_idx = int(row_idx_str)
+
+    def _apply():
+        _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
+        rp = reports_sheet.row_values(row_idx) + [""] * 10
+        stu = None
+        for row in students_sheet.get_all_values()[1:]:
+            if row and row[0] == rp[1]:
+                stu = row + [""] * (11 - len(row))
+                break
+
+        if action == "rpt_approve":
+            now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+            reports_sheet.update(values=[["Approved", now_str]], range_name=f"H{row_idx}:I{row_idx}")
+        elif action == "rpt_hold":
+            reports_sheet.update_cell(row_idx, 8, "Held")
+        else:
+            reports_sheet.update_cell(row_idx, 8, "Skipped")
+        return rp, stu
+
+    rp, stu = await asyncio.to_thread(_apply)
+    webapp_router.invalidate_reg_cache()
+
+    s_name = stu[1] if stu else rp[1]
+    if action == "rpt_approve":
+        parent_tg = stu[5].strip() if stu else ""
+        if parent_tg:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(parent_tg),
+                    text=(
+                        f"📊 <b>QELAL BI-WEEKLY PROGRESS REPORT</b>\n\n"
+                        f"👤 <b>Student:</b> {html.escape(s_name)} ({html.escape(stu[2])})\n"
+                        f"🗓 <b>Period:</b> {html.escape(rp[2])}\n"
+                        f"✅ <b>Attendance:</b> {html.escape(rp[3])}\n"
+                        f"📈 <b>Scores:</b> {html.escape(rp[4])}\n"
+                        f"🔼 <b>Improved:</b> {html.escape(rp[5])}\n"
+                        f"🎯 <b>Next Focus:</b> {html.escape(rp[6])}"
+                    ),
+                    reply_markup=webapp_keyboard("📊 View in Parent Dashboard"),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"Could not send report to parent {parent_tg}: {e}")
+        await query.edit_message_text(f"✅ Approved &amp; published report for <b>{html.escape(s_name)}</b>!", parse_mode="HTML")
+    elif action == "rpt_hold":
+        await query.edit_message_text(f"⏸ Held report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+    else:
+        await query.edit_message_text(f"❌ Skipped report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+
+
+# ==============================================================================
+# 5. AUTOMATED 30-DAY BILLING CHECKER & GRACE ALERTS
 # ==============================================================================
 async def run_daily_billing_check(bot):
     today = datetime.now(EAT_TZ).date()
 
     def _scan_billing():
         reg_sheet, _ = get_sheets()
-        rows = reg_sheet.get_all_values()
         updates, alerts = [], []
-        for idx, row in enumerate(rows[1:], start=2):
-            r = row + [""] * (15 - len(row))
+        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+            r = row + [""] * (18 - len(row))
             status, tg_id, exp_str = r[4].strip().upper(), r[6].strip(), r[8].strip()
             if not tg_id or not exp_str or status not in ("APPROVED", "EXPIRED"):
                 continue
@@ -800,15 +758,13 @@ async def run_daily_billing_check(bot):
             await bot.send_message(
                 chat_id=ADMIN_USER_ID,
                 text=f"⏰ <b>Renewal Reminder — Day {day_num}/30 ({days_left}d left)</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>",
-                reply_markup=kb,
-                parse_mode="HTML",
+                reply_markup=kb, parse_mode="HTML",
             )
         elif kind == "GRACE":
             await bot.send_message(
                 chat_id=ADMIN_USER_ID,
-                text=f"⚠️ <b>EXPIRED (Grace Day {day_num - 30}/7 — Day {day_num})</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>\n<i>Student keeps access during the 7-day grace window.</i>",
-                reply_markup=kb,
-                parse_mode="HTML",
+                text=f"⚠️ <b>EXPIRED (Grace Day {day_num - 30}/7 — Day {day_num})</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>\n<i>User keeps access during the 7-day grace window.</i>",
+                reply_markup=kb, parse_mode="HTML",
             )
         elif kind == "AUTO_LEFT":
             await bot.send_message(
@@ -843,7 +799,7 @@ async def billing_scheduler_loop(bot):
 
 
 # ==============================================================================
-# 5. STATS, BROADCASTS, LINK VERIFICATION & SYNC DRIVE
+# 6. STATS, BROADCASTS, SMART LINK VERIFIER & DRIVE SYNC
 # ==============================================================================
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -851,17 +807,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now(EAT_TZ).date()
 
     def _gather():
-        reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, cfg_sheet, _ = get_all_worksheets()
+        reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, cfg_sheet, _, students_sheet, _ = get_all_worksheets()
         reg_rows = reg_sheet.get_all_values()[1:]
         pdf_rows = pdf_sheet.get_all_values()[1:]
         key_rows = keys_sheet.get_all_values()[1:]
         ana_rows = analytics_sheet.get_all_values()[1:]
+        stu_rows = students_sheet.get_all_values()[1:]
         cfg = get_config_dict(cfg_sheet)
 
         counts = {"APPROVED": 0, "NEW": 0, "EXPIRED": 0, "LEFT": 0, "REJECTED": 0}
         expiring_soon, total_refs = [], 0
         for row in reg_rows:
-            r = row + [""] * (15 - len(row))
+            r = row + [""] * (18 - len(row))
             st = r[4].strip().upper() or "NEW"
             counts[st] = counts.get(st, 0) + 1
             if r[14].isdigit():
@@ -884,15 +841,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 popularity[a[6]] = popularity.get(a[6], 0) + 1
         top_docs = sorted(popularity.items(), key=lambda x: x[1], reverse=True)[:5]
 
-        return cfg.get("LAUNCH_MODE", "OPEN_LAUNCH"), counts, total_refs, expiring_soon[:8], len(pdf_rows), len(key_rows), verified_links, needs_review, unlinked_answers, top_docs
+        return cfg.get("LAUNCH_MODE", "OPEN_LAUNCH"), counts, len(stu_rows), total_refs, expiring_soon[:8], len(pdf_rows), len(key_rows), verified_links, needs_review, unlinked_answers, top_docs
 
-    launch_mode, counts, total_refs, upcoming, total_pdfs, total_keys, verified_links, needs_review, unlinked_ans, top_docs = await asyncio.to_thread(_gather)
+    launch_mode, counts, total_students, total_refs, upcoming, total_pdfs, total_keys, verified_links, needs_review, unlinked_ans, top_docs = await asyncio.to_thread(_gather)
 
     lines = [
-        "📊 <b>QELAL / BISHOFTU HUB — STATS</b>\n",
+        "📊 <b>QELAL LEARNING — ADMIN STATS</b>\n",
         f"🚦 <b>Mode:</b> <code>{launch_mode}</code> ({'/end_launch to gate' if launch_mode == 'OPEN_LAUNCH' else 'Paid/Approved Gated'})",
-        f"👥 <b>Students:</b> {counts.get('APPROVED',0)} Approved | {counts.get('NEW',0)} Pending | {counts.get('EXPIRED',0)} Grace | {counts.get('LEFT',0)} Left",
-        f"🤝 <b>Verified Referrals:</b> {total_refs}",
+        f"👥 <b>Accounts:</b> {counts.get('APPROVED',0)} Approved | {counts.get('NEW',0)} Pending | {counts.get('EXPIRED',0)} Grace | {counts.get('LEFT',0)} Left",
+        f"🎓 <b>Total Enrolled Students:</b> {total_students} | 🤝 <b>Referrals:</b> {total_refs}",
         f"📚 <b>Library:</b> {total_pdfs} Resources | {verified_links} Verified Links | {total_keys} Quiz Keys",
         f"⚠️ <b>Link Review Needed:</b> {needs_review} | <b>Unlinked Answers:</b> {unlinked_ans}\n",
     ]
@@ -916,22 +873,25 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not raw:
         await update.message.reply_text(
             "📢 <b>How to use /broadcast:</b>\n\n"
-            "• <code>/broadcast All Hello students, check the library!</code>\n"
+            "• <code>/broadcast All Hello everyone, check the library!</code>\n"
+            "• <code>/broadcast Parents Bi-weekly progress reports are ready!</code>\n"
             "• <code>/broadcast Grade 12 New 2018 Physics Model uploaded!</code>\n"
-            "• <code>/broadcast Natural Biology notes added!</code>\n"
+            "• <code>/broadcast Grade 8 Ministry mock quiz added!</code>\n"
+            "• <code>/broadcast Natural Biology unit 4 notes added!</code>\n"
             "• <code>/broadcast Social History notes updated!</code>\n"
             "• <code>/broadcast Approved Class starts Saturday 2:30 LT.</code>\n"
-            "• <code>/broadcast New Finish payment to unlock 300+ PDFs!</code>",
+            "• <code>/broadcast New Call +251 933 510 682 to complete payment!</code>",
             parse_mode="HTML",
         )
         return
 
     low = raw.lower()
-    target_label, filter_fn, message_text = "All Students", (lambda row: True), raw
+    target_label, filter_fn, message_text = "All Registered Accounts", (lambda row: True), raw
     for prefix, label, fn in [
-        ("all ", "All Registered Students", lambda r: True),
-        ("approved ", "Approved Students", lambda r: r[4].strip().upper() in ("APPROVED", "EXPIRED")),
-        ("new ", "Pending (NEW) Students", lambda r: r[4].strip().upper() == "NEW"),
+        ("all ", "All Registered Accounts", lambda r: True),
+        ("parents ", "All Parents", lambda r: r[15].strip().lower() == "parent"),
+        ("approved ", "Approved Accounts", lambda r: r[4].strip().upper() in ("APPROVED", "EXPIRED")),
+        ("new ", "Pending (NEW) Accounts", lambda r: r[4].strip().upper() == "NEW"),
         ("natural ", "Natural Science Students", lambda r: r[11].strip().lower() == "natural"),
         ("social ", "Social Science Students", lambda r: r[11].strip().lower() == "social"),
         ("grade 12 ", "Grade 12 Students", lambda r: r[2].strip() == "Grade 12"),
@@ -951,26 +911,25 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reg_sheet, _ = get_sheets()
         ids = []
         for row in reg_sheet.get_all_values()[1:]:
-            r = row + [""] * (15 - len(row))
+            r = row + [""] * (18 - len(row))
             if r[6].strip() and filter_fn(r):
                 ids.append(int(r[6].strip()))
         return list(dict.fromkeys(ids))
 
     recipients = await asyncio.to_thread(_get_recipients)
     if not recipients:
-        await update.message.reply_text(f"⚠️ No students matched target: <b>{target_label}</b>", parse_mode="HTML")
+        await update.message.reply_text(f"⚠️ No accounts matched target: <b>{target_label}</b>", parse_mode="HTML")
         return
 
     bid = str(update.message.message_id)
     PENDING_BROADCASTS[bid] = {"recipients": recipients, "text": message_text, "target": target_label}
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"🚀 Send to {len(recipients)} Students", callback_data=f"bc_send:{bid}"),
+        InlineKeyboardButton(f"🚀 Send to {len(recipients)} Users", callback_data=f"bc_send:{bid}"),
         InlineKeyboardButton("❌ Cancel", callback_data=f"bc_cancel:{bid}"),
     ]])
     await update.message.reply_text(
         f"📢 <b>Broadcast Preview</b>\n🎯 <b>Target:</b> {target_label} ({len(recipients)} users)\n\n<i>{html.escape(message_text)}</i>",
-        reply_markup=kb,
-        parse_mode="HTML",
+        reply_markup=kb, parse_mode="HTML",
     )
 
 
@@ -987,9 +946,9 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     await query.answer("Sending...")
-    await query.edit_message_text(f"📤 Sending to {len(payload['recipients'])} students...")
+    await query.edit_message_text(f"📤 Sending to {len(payload['recipients'])} users...")
     sent = failed = 0
-    formatted = f"📢 <b>Announcement — Qelal / Bishoftu Hub</b>\n\n{html.escape(payload['text'])}"
+    formatted = f"📢 <b>Announcement — Qelal Learning (ቀላል)</b>\n\n{html.escape(payload['text'])}"
     for uid in payload["recipients"]:
         try:
             await context.bot.send_message(chat_id=uid, text=formatted, parse_mode="HTML")
@@ -1004,14 +963,14 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def download_doc_bytes(drive_token: str | None, drive_pdf_id: str, telegram_file_id: str) -> bytes | None:
     if drive_pdf_id and drive_token:
         url = f"https://www.googleapis.com/drive/v3/files/{drive_pdf_id}?alt=media&supportsAllDrives=true"
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             r = await client.get(url, headers={"Authorization": f"Bearer {drive_token}"})
             if r.status_code == 200:
                 return r.content
     if telegram_file_id:
         tg_file = await ptb_app.bot.get_file(telegram_file_id)
         f_url = tg_file.file_path if tg_file.file_path.startswith("http") else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             r = await client.get(f_url)
             if r.status_code == 200:
                 return r.content
@@ -1022,8 +981,6 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.effective_user.id != ADMIN_USER_ID:
         return
     status_msg = await update.message.reply_text("🔍 Inspecting PDFs to verify & smart-match Exam ↔ Answer links...")
-
-    from link_verifier import analyze_answer_pdf, score_exam_answer_match
 
     def _load():
         _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
@@ -1040,8 +997,7 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
     verified_count = rejected_count = review_count = embedded_keys_parsed = newly_discovered = 0
     now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
 
-    exam_cache = {}
-    ans_cache = {}
+    exam_cache, ans_cache = {}, {}
 
     async def get_exam_analysis(doc_id, r):
         if doc_id not in exam_cache:
@@ -1103,7 +1059,7 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
                     existing_key_ids.add(doc_id)
                     embedded_keys_parsed += 1
 
-    # 2. Smart Content Discovery for unlinked Answer Sheets (matches by Subject + internal PDF Year/Code/Qs)
+    # 2. Smart Content Discovery for unlinked Answer Sheets
     for ans_id, (ans_idx, ans_r) in by_id.items():
         if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
             continue
@@ -1115,7 +1071,7 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
         for ex_id, (ex_idx, ex_r) in by_id.items():
             if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
                 continue
-            if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):  # Must match Subject
+            if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):
                 continue
             ex_info = await get_exam_analysis(ex_id, ex_r)
             if not ex_info:
@@ -1185,8 +1141,7 @@ async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
         ]])
         await update.message.reply_text(
             f"🧐 <b>Verify Link</b>\n📄 <b>Exam ({ex_r[0]}):</b> {html.escape(ex_r[1])}\n🔑 <b>Answer ({ans_r[0]}):</b> {html.escape(ans_r[1])}",
-            reply_markup=kb,
-            parse_mode="HTML",
+            reply_markup=kb, parse_mode="HTML",
         )
 
 
@@ -1270,10 +1225,7 @@ def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
             resp = drive_service.files().list(
                 q=f"'{current_folder}' in parents and trashed = false",
                 fields="nextPageToken, files(id, name, mimeType, size, md5Checksum, parents)",
-                pageSize=1000,
-                pageToken=page_token,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
+                pageSize=1000, pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True,
             ).execute()
             for f in resp.get("files", []):
                 if f.get("mimeType") == "application/vnd.google-apps.folder":
@@ -1343,12 +1295,7 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 office_file = ext_map.get("pptx") or ext_map.get("docx")
                 new_pdf_id = await convert_office_via_apps_script(office_file["id"])
                 if new_pdf_id:
-                    ext_map["pdf"] = {
-                        "id": new_pdf_id,
-                        "name": office_file["name"].rsplit(".", 1)[0] + ".pdf",
-                        "size": office_file.get("size", "0"),
-                        "md5Checksum": new_pdf_id,
-                    }
+                    ext_map["pdf"] = {"id": new_pdf_id, "name": office_file["name"].rsplit(".", 1)[0] + ".pdf", "size": office_file.get("size", "0"), "md5Checksum": new_pdf_id}
                     converted_count += 1
 
     next_num, new_rows, twin_updates = len(existing_rows), [], []
@@ -1391,7 +1338,7 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ <b>Google Drive Sync Complete!</b>\n\n"
         f"📥 <b>Added:</b> {len(new_rows)} | 📄 <b>Converted:</b> {converted_count}\n"
         f"🔗 <b>Candidate Pairs:</b> {paired_count} | ♻️ <b>Duplicates:</b> {skipped_duplicates} | 🚫 <b>Excluded:</b> {skipped_excluded}\n\n"
-        f"👉 Run /verify_links next to verify PDF pairs & parse Quiz keys!",
+        f"👉 Run /verify_links next to verify PDF pairs &amp; parse Quiz keys!",
         parse_mode="HTML",
     )
 
@@ -1433,7 +1380,7 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ==============================================================================
-# 6. FASTAPI APP, MINI APP ROUTER & LIFECYCLE
+# 7. FASTAPI APP, MINI APP ROUTER & LIFECYCLE
 # ==============================================================================
 app = FastAPI()
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
@@ -1449,26 +1396,14 @@ webapp_router = create_webapp_router(
 )
 app.include_router(webapp_router)
 
-reg_handler = ConversationHandler(
-    entry_points=[CommandHandler("register", start_register), CommandHandler("start", start_register)],
-    states={
-        NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-        GRADE: [CallbackQueryHandler(get_grade, pattern=r"^g:")],
-        STREAM: [CallbackQueryHandler(get_stream, pattern=r"^stream:")],
-        PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-        REFERRAL: [
-            CallbackQueryHandler(skip_referral, pattern=r"^skip_ref$"),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, get_referral_code),
-        ],
-    },
-    fallbacks=[CommandHandler("cancel", cancel)],
-)
-ptb_app.add_handler(reg_handler)
+ptb_app.add_handler(CommandHandler("start", start_command))
+ptb_app.add_handler(CommandHandler("register", start_command))
 ptb_app.add_handler(CommandHandler("library", open_library_command))
 ptb_app.add_handler(CommandHandler("referral", referral_command))
 ptb_app.add_handler(CommandHandler("squad", referral_command))
 ptb_app.add_handler(CommandHandler("check_leads", check_leads))
 ptb_app.add_handler(CommandHandler("check_billing", check_billing_command))
+ptb_app.add_handler(CommandHandler("review_reports", review_reports_command))
 ptb_app.add_handler(CommandHandler("stats", stats_command))
 ptb_app.add_handler(CommandHandler("broadcast", broadcast_command))
 ptb_app.add_handler(CommandHandler("sync_drive", sync_drive_command))
@@ -1478,6 +1413,7 @@ ptb_app.add_handler(CommandHandler("end_launch", end_launch_command))
 ptb_app.add_handler(CommandHandler("reopen_launch", reopen_launch_command))
 
 ptb_app.add_handler(CallbackQueryHandler(handle_student_action_callback, pattern=r"^(approve_user:|reject_user:|mark_paid:|mark_left:|approve_all_new)"))
+ptb_app.add_handler(CallbackQueryHandler(handle_report_decision, pattern=r"^rpt_"))
 ptb_app.add_handler(CallbackQueryHandler(broadcast_callback, pattern=r"^(bc_send:|bc_cancel:)"))
 ptb_app.add_handler(CallbackQueryHandler(link_review_callback, pattern=r"^(link_ok:|link_no:)"))
 ptb_app.add_handler(CallbackQueryHandler(launch_callback, pattern=r"^(launch_confirm:|launch_cancel)"))
@@ -1498,7 +1434,7 @@ async def startup_event():
     if WEBAPP_URL:
         try:
             await ptb_app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="📚 Library", web_app=WebAppInfo(url=WEBAPP_URL))
+                menu_button=MenuButtonWebApp(text="🚀 Open Qelal", web_app=WebAppInfo(url=WEBAPP_URL))
             )
         except Exception as e:
             logger.warning(f"Menu button error: {e}")
@@ -1523,4 +1459,4 @@ async def webhook(request: Request):
 
 @app.get("/")
 def index():
-    return {"status": "Qelal / Bishoftu Tutoring Bot is active!"}
+    return {"status": "Qelal Learning (ቀላል) Bot is active!"}
