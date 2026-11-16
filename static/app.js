@@ -991,18 +991,28 @@ async function loadActiveReaderDoc() {
   loadingEl.classList.remove("hidden");
 
   const streamUrl = `/api/file/${activeDoc.doc_id}/stream?token=${encodeURIComponent(sessionToken)}`;
+  const isLarge = (activeDoc.file_size_mb || 0) > 8;
+  const pdfOpts = isLarge
+    ? { url: streamUrl, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true }
+    : { url: streamUrl };
+
   try {
     if (currentPdfDoc) try { await currentPdfDoc.destroy(); } catch {}
-    currentPdfDoc = await pdfjsLib.getDocument({
-      url: streamUrl, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true,
-    }).promise;
+    try {
+      currentPdfDoc = await pdfjsLib.getDocument(pdfOpts).promise;
+    } catch (rangeErr) {
+      if (!isLarge) throw rangeErr;
+      currentPdfDoc = await pdfjsLib.getDocument({ url: streamUrl }).promise;
+    }
     document.getElementById("pageCount").textContent = currentPdfDoc.numPages;
     currentPage = Math.min(showingAnswer ? savedAnswerPage : savedMainPage, currentPdfDoc.numPages);
     await renderPage(currentPage);
-  } catch {
-    document.getElementById("readerLoadText").textContent = "Could not open PDF. Try 'Offline (TG)'.";
+  } catch (err) {
+    console.error("PDF load error:", err);
+    document.getElementById("readerLoadText").textContent = `Could not open PDF (${err?.message || "error"}). Try 'Offline (TG)'.`;
   }
 }
+
 
 async function renderPage(num) {
   if (!currentPdfDoc) return;
