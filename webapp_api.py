@@ -1,4 +1,3 @@
-from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse
 import os
 import hmac
 import json
@@ -14,9 +13,10 @@ from urllib.parse import parse_qsl, quote
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse
 from starlette.background import BackgroundTask
 from google.auth.transport.requests import Request as GoogleAuthRequest
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from study_plans import STUDY_PLAN_TEMPLATES
 
@@ -33,7 +33,7 @@ def create_webapp_router(
     eat_tz,
 ):
     router = APIRouter()
-    session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v3").encode()).digest()
+    session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v4").encode()).digest()
 
     state = {
         "creds": None,
@@ -107,9 +107,15 @@ def create_webapp_router(
 
     # --- CACHED LOADERS ---
     def _load_config_sync() -> dict:
-        _, _, _, _, cfg_sheet, _ = get_all_worksheets_fn()
+        _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
         rows = cfg_sheet.get_all_values()[1:]
-        cfg = {"LAUNCH_MODE": "OPEN_LAUNCH", "MATRIC_DATE": "2027-06-25", "MINISTRY_DATE": "2027-06-15"}
+        cfg = {
+            "LAUNCH_MODE": "OPEN_LAUNCH",
+            "MATRIC_DATE": "2027-06-25",
+            "GRADE8_MINISTRY_DATE": "2027-06-15",
+            "GRADE6_MINISTRY_DATE": "2027-06-10",
+            "SEMESTER_DATE": "2027-01-25",
+        }
         for r in rows:
             if len(r) >= 2 and r[0].strip():
                 cfg[r[0].strip()] = r[1].strip()
@@ -122,11 +128,15 @@ def create_webapp_router(
             state["cfg_cache_ts"] = now
         return state["cfg_cache"]
 
-    def _load_reg_sync() -> dict[str, dict]:
-        reg_sheet, _, _, _, _, _ = get_all_worksheets_fn()
+    def _load_reg_and_students_sync():
+        reg_sheet, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets_fn()
+        reg_rows = reg_sheet.get_all_values()[1:]
+        stu_rows = students_sheet.get_all_values()[1:]
+        rpt_rows = reports_sheet.get_all_values()[1:]
+
         by_tg = {}
-        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
-            r = row + [""] * (15 - len(row))
+        for idx, row in enumerate(reg_rows, start=2):
+            r = row + [""] * (18 - len(row))
             if r[6].strip():
                 ref_code = r[12].strip()
                 if not ref_code:
@@ -145,62 +155,152 @@ def create_webapp_router(
                     "referral_code": ref_code,
                     "referred_by": r[13],
                     "referral_count": int(r[14]) if r[14].isdigit() else 0,
+                    "role": r[15] or "student",
+                    "format": r[16] or "Weekend Hub",
+                    "lang": r[17] or "en",
                 }
-        return by_tg
 
-    async def get_user_access(tg_id: int) -> dict:
-        now = time.time()
-        if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 30):
-            state["reg_cache"] = await asyncio.to_thread(_load_reg_sync)
-            state["reg_cache_ts"] = now
-
-        cfg = await get_config()
-        launch_mode = cfg.get("LAUNCH_MODE", "OPEN_LAUNCH")
-        rec = state["reg_cache"].get(str(tg_id))
-
-        if tg_id == admin_user_id:
-            return {
-                "registered": True,
-                "status": "APPROVED",
-                "tier": "FULL",
-                "launch_mode": launch_mode,
-                "name": rec["name"] if rec else "Admin",
-                "grade": rec["grade"] if rec else "Grade 12",
-                "stream": rec["stream"] if rec else "Natural",
-                "phone": rec["phone"] if rec else "",
-                "expires_on": rec["expires_on"] if rec else "",
-                "referral_code": rec["referral_code"] if rec else "QELAL-ADMIN",
-                "referral_count": rec["referral_count"] if rec else 0,
-                "is_admin": True,
+        children_by_parent = {}
+        child_by_tg = {}
+        student_by_id = {}
+        for row in stu_rows:
+            s = row + [""] * (11 - len(row))
+            if not s[0]:
+                continue
+            stu_obj = {
+                "student_id": s[0],
+                "student_name": s[1],
+                "grade": s[2],
+                "stream": s[3] or "General",
+                "format": s[4] or "Weekend Hub",
+                "parent_tg_id": s[5].strip(),
+                "child_tg_id": s[6].strip(),
+                "child_contact": s[7],
+                "link_token": s[8],
+                "sibling_discount": s[9] == "YES",
             }
+            student_by_id[s[0]] = stu_obj
+            if s[5].strip():
+                children_by_parent.setdefault(s[5].strip(), []).append(stu_obj)
+            if s[6].strip():
+                child_by_tg[s[6].strip()] = stu_obj
 
-        if not rec:
-            return {
-                "registered": False,
-                "status": "NOT_REGISTERED",
-                "tier": "NONE",
-                "launch_mode": launch_mode,
-                "is_admin": False,
-            }
+        approved_reports_by_stu = {}
+        for row in rpt_rows:
+            rp = row + [""] * (10 - len(row))
+            if rp[7].strip().lower() == "approved" and rp[1]:
+                approved_reports_by_stu.setdefault(rp[1], []).append({
+                    "report_id": rp[0],
+                    "student_id": rp[1],
+                    "student_name": student_by_id.get(rp[1], {}).get("student_name", ""),
+                    "grade": student_by_id.get(rp[1], {}).get("grade", ""),
+                    "period": rp[2],
+                    "attendance": rp[3],
+                    "scores_text": rp[4],
+                    "improved_note": rp[5],
+                    "focus_note": rp[6],
+                    "published_at": rp[8],
+                    "tutor_name": rp[9],
+                })
 
-        is_full = (launch_mode == "OPEN_LAUNCH") or (rec["status"] in ("APPROVED", "EXPIRED"))
         return {
-            "registered": True,
-            "status": rec["status"],
-            "tier": "FULL" if is_full else "TRIAL",
-            "launch_mode": launch_mode,
-            "name": rec["name"],
-            "grade": rec["grade"],
-            "stream": rec["stream"],
-            "phone": rec["phone"],
-            "expires_on": rec["expires_on"],
-            "referral_code": rec["referral_code"],
-            "referral_count": rec["referral_count"],
-            "is_admin": False,
+            "by_tg": by_tg,
+            "children_by_parent": children_by_parent,
+            "child_by_tg": child_by_tg,
+            "reports_by_stu": approved_reports_by_stu,
         }
 
+    async def get_reg_bundle() -> dict:
+        now = time.time()
+        if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 30):
+            state["reg_cache"] = await asyncio.to_thread(_load_reg_and_students_sync)
+            state["reg_cache_ts"] = now
+        return state["reg_cache"]
+
+    async def get_user_access(tg_id: int) -> dict:
+        bundle = await get_reg_bundle()
+        cfg = await get_config()
+        launch_mode = cfg.get("LAUNCH_MODE", "OPEN_LAUNCH")
+
+        rec = bundle["by_tg"].get(str(tg_id))
+        linked_child = bundle["child_by_tg"].get(str(tg_id))
+        children = bundle["children_by_parent"].get(str(tg_id), [])
+
+        if tg_id == admin_user_id and not rec:
+            return {
+                "registered": True, "status": "APPROVED", "tier": "FULL", "launch_mode": launch_mode,
+                "role": "admin", "name": "Admin", "grade": "Grade 12", "stream": "Natural",
+                "phone": "", "expires_on": "", "referral_code": "QELAL-ADMIN", "referral_count": 0,
+                "lang": "en", "children": [], "reports": [], "sibling_discount": False, "is_admin": True,
+            }
+
+        if not rec and not linked_child:
+            return {
+                "registered": False, "status": "NOT_REGISTERED", "tier": "NONE",
+                "launch_mode": launch_mode, "is_admin": False,
+            }
+
+        effective_status = rec["status"] if rec else "NEW"
+        effective_expires = rec["expires_on"] if rec else ""
+        if linked_child and linked_child["parent_tg_id"]:
+            parent_rec = bundle["by_tg"].get(linked_child["parent_tg_id"])
+            if parent_rec:
+                effective_status = parent_rec["status"]
+                effective_expires = parent_rec["expires_on"]
+
+        if tg_id == admin_user_id:
+            effective_status = "APPROVED"
+
+        is_full = (tg_id == admin_user_id) or (launch_mode == "OPEN_LAUNCH") or (effective_status in ("APPROVED", "EXPIRED"))
+        role = rec["role"] if rec else "student"
+
+        reports = []
+        if role == "parent":
+            for ch in children:
+                reports.extend(bundle["reports_by_stu"].get(ch["student_id"], []))
+        elif linked_child:
+            reports.extend(bundle["reports_by_stu"].get(linked_child["student_id"], []))
+
+        bot_user = get_bot_username()
+        enriched_children = []
+        for ch in children:
+            inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
+            enriched_children.append({**ch, "invite_url": inv, "is_linked": bool(ch["child_tg_id"])})
+
+        primary_grade = linked_child["grade"] if linked_child else (children[0]["grade"] if children else (rec["grade"] if rec else "Grade 12"))
+        primary_stream = linked_child["stream"] if linked_child else (children[0]["stream"] if children else (rec["stream"] if rec else "General"))
+
+        return {
+            "registered": True,
+            "status": effective_status,
+            "tier": "FULL" if is_full else "TRIAL",
+            "launch_mode": launch_mode,
+            "role": role,
+            "name": rec["name"] if rec else linked_child["student_name"],
+            "grade": primary_grade,
+            "stream": primary_stream,
+            "phone": rec["phone"] if rec else "",
+            "expires_on": effective_expires,
+            "referral_code": rec["referral_code"] if rec else "",
+            "referral_count": rec["referral_count"] if rec else 0,
+            "lang": rec["lang"] if rec else "en",
+            "children": enriched_children,
+            "sibling_discount": any(c["sibling_discount"] for c in children),
+            "reports": reports,
+            "is_admin": tg_id == admin_user_id,
+        }
+
+    def compute_countdown(grade: str, cfg: dict) -> dict:
+        if grade == "Grade 12":
+            return {"date": cfg.get("MATRIC_DATE", "2027-06-25"), "type": "matric_12"}
+        if grade == "Grade 8":
+            return {"date": cfg.get("GRADE8_MINISTRY_DATE", "2027-06-15"), "type": "ministry_8"}
+        if grade == "Grade 6":
+            return {"date": cfg.get("GRADE6_MINISTRY_DATE", "2027-06-10"), "type": "ministry_6"}
+        return {"date": cfg.get("SEMESTER_DATE", "2027-01-25"), "type": "semester"}
+
     def _load_library_and_keys_sync():
-        _, pdf_sheet, keys_sheet, _, _, _ = get_all_worksheets_fn()
+        _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets_fn()
         pdf_rows = pdf_sheet.get_all_values()[1:]
         key_rows = keys_sheet.get_all_values()[1:]
 
@@ -223,27 +323,13 @@ def create_webapp_router(
                 continue
             r = row + [""] * (22 - len(row))
             item = {
-                "row_idx": idx,
-                "doc_id": r[0],
-                "file_name": r[1],
-                "grade": r[2],
-                "stream": r[3],
-                "subject": r[4],
-                "category": r[5],
-                "year": r[6],
-                "exam_tag": r[7],
-                "round_or_code": r[8],
-                "link_key": r[9],
-                "linked_doc_id": r[10],
-                "has_embedded_answer": r[11],
-                "format": r[12],
-                "file_size_mb": float(r[13]) if r[13] else 0.0,
-                "source": r[14],
-                "drive_pdf_id": r[15],
-                "drive_original_id": r[16],
-                "telegram_file_id": r[17],
-                "post_link": r[19],
-                "link_status": r[20],
+                "row_idx": idx, "doc_id": r[0], "file_name": r[1], "grade": r[2],
+                "stream": r[3], "subject": r[4], "category": r[5], "year": r[6],
+                "exam_tag": r[7], "round_or_code": r[8], "link_key": r[9],
+                "linked_doc_id": r[10], "has_embedded_answer": r[11], "format": r[12],
+                "file_size_mb": float(r[13]) if r[13] else 0.0, "source": r[14],
+                "drive_pdf_id": r[15], "drive_original_id": r[16], "telegram_file_id": r[17],
+                "post_link": r[19], "link_status": r[20],
                 "is_trial": r[21].strip().upper() == "YES",
                 "has_quiz": r[0] in keys_by_id,
                 "quiz_total_q": keys_by_id[r[0]]["total_q"] if r[0] in keys_by_id else 0,
@@ -273,17 +359,16 @@ def create_webapp_router(
             )
         ]
         if stream in ("Natural", "Social"):
-            stream_filtered = [it for it in grade_matches if it["stream"] in (stream, "General")]
-            if len(stream_filtered) >= 3:
-                grade_matches = stream_filtered
+            sf = [it for it in grade_matches if it["stream"] in (stream, "General")]
+            if len(sf) >= 3:
+                grade_matches = sf
 
         explicit = [it["doc_id"] for it in grade_matches if it["is_trial"]]
         if len(explicit) >= 3:
             return set(explicit[:3])
 
-        priority_cats = ("Textbook", "Short Note / Lesson", "Entrance Exam", "Model Exam", "Supplementary Book", "Study Plan / Schedule")
         picked = list(explicit)
-        for cat in priority_cats:
+        for cat in ("Textbook", "Short Note / Lesson", "Entrance Exam", "Model Exam", "Supplementary Book", "Study Plan / Schedule"):
             for it in grade_matches:
                 if it["doc_id"] not in picked and it["category"] == cat:
                     picked.append(it["doc_id"])
@@ -315,7 +400,7 @@ def create_webapp_router(
         return tg_id, access
 
     def _flush_analytics_sync(rows: list[list[str]]):
-        _, _, _, analytics_sheet, _, _ = get_all_worksheets_fn()
+        _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
         analytics_sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
     async def log_analytics(tg_id: int, access: dict, action: str, doc_id: str, file_name: str, subject: str, score: str = ""):
@@ -354,7 +439,7 @@ def create_webapp_router(
         raise HTTPException(status_code=404, detail="Source missing")
 
     # ==========================================================================
-    # ROUTES (NO EXTERNAL DOWNLOAD ENDPOINT — TELEGRAM-ONLY PROTECTED VIEWING)
+    # ROUTES
     # ==========================================================================
     @router.get("/webapp", response_class=HTMLResponse)
     async def serve_webapp():
@@ -363,7 +448,7 @@ def create_webapp_router(
             return HTMLResponse("<h1>Missing static/index.html</h1>", status_code=500)
         with open(html_path, "r", encoding="utf-8") as f:
             return HTMLResponse(f.read())
-            
+
     @router.get("/static/{file_path:path}")
     async def serve_static_asset(file_path: str):
         static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
@@ -382,11 +467,14 @@ def create_webapp_router(
         tg_id = int(user["id"])
         access = await get_user_access(tg_id)
         if not access["registered"] and not access["is_admin"]:
-            return {"ok": False, "status": "NOT_REGISTERED"}
+            return {
+                "ok": False,
+                "status": "NOT_REGISTERED",
+                "tg_first_name": user.get("first_name", ""),
+            }
 
         cfg = await get_config()
         token = create_session_token(tg_id)
-
         days_left = None
         if access.get("expires_on"):
             try:
@@ -400,18 +488,166 @@ def create_webapp_router(
             "status": access["status"],
             "tier": access["tier"],
             "launch_mode": access["launch_mode"],
+            "role": access["role"],
             "name": access["name"],
             "grade": access["grade"],
             "stream": access["stream"],
+            "lang": access.get("lang", "en"),
             "is_admin": access["is_admin"],
             "days_left": days_left,
             "referral_code": access.get("referral_code", ""),
             "referral_count": access.get("referral_count", 0),
+            "sibling_discount": access.get("sibling_discount", False),
+            "children": access.get("children", []),
+            "reports": access.get("reports", []),
+            "countdown": compute_countdown(access["grade"], cfg),
             "bot_username": get_bot_username(),
-            "matric_date": cfg.get("MATRIC_DATE", "2027-06-25"),
-            "ministry_date": cfg.get("MINISTRY_DATE", "2027-06-15"),
             "token": token,
         }
+
+    @router.post("/api/register")
+    async def api_register(request: Request):
+        body = await request.json()
+        user = verify_telegram_init_data(body.get("initData", ""))
+        if not user:
+            raise HTTPException(status_code=401, detail="Open inside Telegram to register")
+
+        tg_id = int(user["id"])
+        existing = await get_user_access(tg_id)
+        if existing["registered"]:
+            return {"ok": True, "already_registered": True}
+
+        role = "parent" if body.get("role") == "parent" else "student"
+        lang = "am" if body.get("lang") == "am" else "en"
+        full_name = (body.get("full_name") or "").strip()
+        phone = (body.get("phone") or "").strip()
+        prog_format = (body.get("format") or "Weekend Hub").strip()
+        entered_ref = (body.get("referral_code") or "").strip().upper()
+        children = body.get("children") or []
+
+        if not full_name or not phone:
+            raise HTTPException(status_code=400, detail="Name and phone are required")
+        if not children:
+            raise HTTPException(status_code=400, detail="At least one student/grade is required")
+
+        my_ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+        timestamp = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
+
+        def _write_registration():
+            reg_sheet, _, _, _, cfg_sheet, _, students_sheet, _ = get_all_worksheets_fn()
+            reg_rows = reg_sheet.get_all_values()
+
+            valid_ref_code, referrer_name = "", ""
+            if entered_ref:
+                for rr in reg_rows[1:]:
+                    rp = rr + [""] * (18 - len(rr))
+                    if rp[12].strip().upper() == entered_ref and rp[6].strip() != str(tg_id):
+                        valid_ref_code = entered_ref
+                        referrer_name = rp[1]
+                        break
+
+            next_id = max(1, len(reg_rows))
+            has_sibling_discount = (role == "parent") and (len(children) >= 2)
+
+            if role == "student":
+                ch = children[0]
+                grade_val = ch.get("grade", "Grade 12")
+                stream_val = ch.get("stream", "General") if grade_val in ("Grade 11", "Grade 12") else "General"
+                ch_fmt = ch.get("format", prog_format)
+            else:
+                grade_val = children[0].get("grade", "Grade 12") if len(children) == 1 else f"Parent ({len(children)} kids)"
+                stream_val = children[0].get("stream", "General") if len(children) == 1 else "General"
+                ch_fmt = prog_format
+
+            reg_sheet.append_row([
+                next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
+                "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
+                role, ch_fmt, lang,
+            ])
+
+            stu_rows_to_add, created_children = [], []
+            for ch in children:
+                stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
+                c_name = (ch.get("name") or full_name).strip()
+                c_grade = ch.get("grade", "Grade 12")
+                c_stream = ch.get("stream", "General") if c_grade in ("Grade 11", "Grade 12") else "General"
+                c_fmt = ch.get("format", prog_format)
+                c_contact = (ch.get("child_contact") or "").strip()
+                link_tok = f"child_{uuid.uuid4().hex[:8]}" if role == "parent" else ""
+                child_tg = str(tg_id) if role == "student" else ""
+                parent_tg = str(tg_id) if role == "parent" else ""
+
+                stu_rows_to_add.append([
+                    stu_id, c_name, c_grade, c_stream, c_fmt,
+                    parent_tg, child_tg, c_contact, link_tok,
+                    "YES" if has_sibling_discount else "NO", timestamp,
+                ])
+                created_children.append({
+                    "student_id": stu_id, "student_name": c_name, "grade": c_grade,
+                    "stream": c_stream, "format": c_fmt, "child_contact": c_contact, "link_token": link_tok,
+                })
+
+            if stu_rows_to_add:
+                students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED")
+
+            launch_mode = "OPEN_LAUNCH"
+            for cr in cfg_sheet.get_all_values()[1:]:
+                if len(cr) >= 2 and cr[0].strip() == "LAUNCH_MODE":
+                    launch_mode = cr[1].strip()
+            return valid_ref_code, referrer_name, has_sibling_discount, created_children, launch_mode
+
+        valid_ref, ref_name, sibling_disc, created_children, launch_mode = await asyncio.to_thread(_write_registration)
+        invalidate_reg_cache()
+
+        bot_user = get_bot_username()
+        child_lines = []
+        for ch in created_children:
+            inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
+            c_txt = f"• <b>{html.escape(ch['student_name'])}</b> — {html.escape(ch['grade'])}"
+            if ch["stream"] != "General":
+                c_txt += f" ({ch['stream']})"
+            if ch["child_contact"]:
+                c_txt += f"\n  📲 Child TG/Contact: <code>{html.escape(ch['child_contact'])}</code>"
+            if inv:
+                c_txt += f"\n  🔗 Child Invite Link: {inv}"
+            child_lines.append(c_txt)
+
+        admin_msg = (
+            f"🚨 <b>NEW {role.upper()} REGISTRATION (Mini App)</b>\n\n"
+            f"👤 <b>Name:</b> {html.escape(full_name)}\n"
+            f"📞 <b>Phone:</b> <code>{html.escape(phone)}</code>\n"
+            f"🆔 <code>{tg_id}</code> | 🔑 Code: <code>{my_ref_code}</code>\n"
+            f"{'🎉 <b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)!</b>\n' if sibling_disc else ''}"
+            f"{f'🤝 <b>Referred by:</b> {html.escape(ref_name)} (<code>{valid_ref}</code>)\n' if valid_ref else ''}\n"
+            f"<b>Students:</b>\n" + "\n".join(child_lines)
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_user:{tg_id}"),
+        ]])
+        try:
+            await get_ptb_app().bot.send_message(chat_id=admin_user_id, text=admin_msg, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Failed notifying admin: {e}")
+
+        return {"ok": True, "referral_code": my_ref_code, "sibling_discount": sibling_disc, "launch_mode": launch_mode}
+
+    @router.post("/api/set-lang")
+    async def api_set_lang(request: Request):
+        tg_id, _ = await require_session(request)
+        body = await request.json()
+        lang = "am" if body.get("lang") == "am" else "en"
+
+        def _update():
+            reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
+            for idx, r in enumerate(reg_sheet.get_all_values()[1:], start=2):
+                if len(r) >= 7 and r[6].strip() == str(tg_id):
+                    reg_sheet.update_cell(idx, 18, lang)
+                    return
+
+        await asyncio.to_thread(_update)
+        invalidate_reg_cache()
+        return {"ok": True, "lang": lang}
 
     @router.get("/api/library")
     async def api_library(request: Request, refresh: bool = False):
@@ -428,7 +664,6 @@ def create_webapp_router(
         for it in items:
             is_unlocked = (access["tier"] == "FULL") or (it["doc_id"] in trial_ids)
             linked_id = "" if it["link_status"] == "REJECTED_MISMATCH" else it["linked_doc_id"]
-
             public_items.append({
                 "doc_id": it["doc_id"],
                 "file_name": it["file_name"],
@@ -449,7 +684,6 @@ def create_webapp_router(
                 "locked": not is_unlocked,
                 "is_trial_pick": it["doc_id"] in trial_ids,
             })
-
         return {"ok": True, "tier": access["tier"], "launch_mode": access["launch_mode"], "items": public_items}
 
     @router.api_route("/api/file/{doc_id}/stream", methods=["GET", "HEAD"])
@@ -468,16 +702,7 @@ def create_webapp_router(
         url, auth_headers, fname, mime_type = await get_upstream_source(item)
 
         if request.method == "HEAD":
-            head_headers = {"Accept-Ranges": "bytes", "Content-Type": mime_type}
-            if item["drive_pdf_id"]:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    meta_resp = await client.get(
-                        f"https://www.googleapis.com/drive/v3/files/{item['drive_pdf_id']}?fields=size&supportsAllDrives=true",
-                        headers=auth_headers,
-                    )
-                    if meta_resp.status_code == 200 and meta_resp.json().get("size"):
-                        head_headers["Content-Length"] = str(meta_resp.json()["size"])
-            return Response(status_code=200, headers=head_headers)
+            return Response(status_code=200, headers={"Accept-Ranges": "bytes", "Content-Type": mime_type})
 
         range_hdr = request.headers.get("range", "")
         if not range_hdr or range_hdr.startswith("bytes=0-"):
@@ -487,10 +712,12 @@ def create_webapp_router(
         if range_hdr:
             upstream_headers["Range"] = range_hdr
 
-        client = httpx.AsyncClient(timeout=60.0)
+        client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
         req = client.build_request("GET", url, headers=upstream_headers)
         upstream_resp = await client.send(req, stream=True)
         if upstream_resp.status_code >= 400:
+            err_preview = (await upstream_resp.aread()).decode("utf-8", "ignore")[:250]
+            logger.error(f"Upstream stream error ({upstream_resp.status_code}) for {doc_id}: {err_preview}")
             await upstream_resp.aclose()
             await client.aclose()
             raise HTTPException(status_code=upstream_resp.status_code, detail="Storage error")
@@ -518,12 +745,6 @@ def create_webapp_router(
 
     @router.post("/api/file/{doc_id}/send")
     async def api_send_offline_telegram(doc_id: str, request: Request):
-        """
-        Sends protected copy inside Telegram ONLY (protect_content=True):
-        - Disabled forwarding to other people
-        - Disabled saving to local device file manager / Downloads
-        - Screenshots blocked on supported Telegram mobile clients
-        """
         tg_id, access = await require_session(request)
         items, by_id, _ = await get_library_and_keys()
         item = by_id.get(doc_id)
@@ -539,33 +760,26 @@ def create_webapp_router(
         caption = (
             f"📚 <b>{html.escape(item['file_name'])}</b>\n"
             f"🏷 {item['grade']} | {item['subject']} | {item['category']}\n"
-            f"🔒 <i>Viewable offline inside Telegram only (forwarding & saving disabled).</i>"
+            f"🔒 <i>Viewable offline inside Telegram only (forwarding &amp; local saving disabled).</i>"
         )
 
         if item["telegram_file_id"]:
             await bot.send_document(
-                chat_id=tg_id,
-                document=item["telegram_file_id"],
-                caption=caption,
-                protect_content=True,
-                parse_mode="HTML",
+                chat_id=tg_id, document=item["telegram_file_id"],
+                caption=caption, protect_content=True, parse_mode="HTML",
             )
             await log_analytics(tg_id, access, "SEND_CHAT", doc_id, item["file_name"], item["subject"])
             return {"ok": True, "cached": True}
 
         if item["file_size_mb"] > 48:
-            return {
-                "ok": False,
-                "too_large": True,
-                "message": "This large book (>48 MB) exceeds Telegram bot send limits—please read it right here inside the Mini App reader!",
-            }
+            return {"ok": False, "too_large": True, "message": "This large book (>48 MB) can be read directly inside the Mini App reader!"}
 
         url, auth_headers, fname, _ = await get_upstream_source(item)
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(delete=False) as tmp:
                 tmp_path = tmp.name
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
                 async with client.stream("GET", url, headers=auth_headers) as r:
                     r.raise_for_status()
                     with open(tmp_path, "wb") as f:
@@ -574,12 +788,8 @@ def create_webapp_router(
 
             with open(tmp_path, "rb") as f:
                 sent_msg = await bot.send_document(
-                    chat_id=tg_id,
-                    document=f,
-                    filename=fname,
-                    caption=caption,
-                    protect_content=True,
-                    parse_mode="HTML",
+                    chat_id=tg_id, document=f, filename=fname,
+                    caption=caption, protect_content=True, parse_mode="HTML",
                 )
 
             if sent_msg.document and not item["telegram_file_id"]:
@@ -587,7 +797,7 @@ def create_webapp_router(
                 item["telegram_file_id"] = new_tg_id
 
                 def _save_tg_id():
-                    _, pdf_sheet, _, _, _, _ = get_all_worksheets_fn()
+                    _, pdf_sheet, _, _, _, _, _, _ = get_all_worksheets_fn()
                     pdf_sheet.update_cell(item["row_idx"], 18, new_tg_id)
 
                 await asyncio.to_thread(_save_tg_id)
@@ -611,17 +821,11 @@ def create_webapp_router(
         total_q = key_data["total_q"]
         trial_limited = access["tier"] == "TRIAL"
         unlocked_q = min(10, total_q) if trial_limited else total_q
-
         return {
-            "ok": True,
-            "doc_id": doc_id,
-            "file_name": item["file_name"],
-            "subject": item["subject"],
-            "year": item["year"],
-            "total_q": total_q,
-            "unlocked_q": unlocked_q,
-            "trial_limited": trial_limited,
-            "sections": key_data["sections"],
+            "ok": True, "doc_id": doc_id, "file_name": item["file_name"],
+            "subject": item["subject"], "year": item["year"],
+            "total_q": total_q, "unlocked_q": unlocked_q,
+            "trial_limited": trial_limited, "sections": key_data["sections"],
         }
 
     @router.post("/api/quiz/{doc_id}/submit")
@@ -653,17 +857,8 @@ def create_webapp_router(
             breakdown.append({"q": q_num, "yours": yours or "-", "correct": correct, "ok": is_right})
 
         pct = round((score / graded) * 100, 1) if graded else 0.0
-        await log_analytics(
-            tg_id, access, "QUIZ_SUBMIT", doc_id, item["file_name"], item["subject"], f"{score}/{graded} ({pct}%)"
-        )
-        return {
-            "ok": True,
-            "score": score,
-            "total_graded": graded,
-            "percentage": pct,
-            "trial_limited": trial_limited,
-            "breakdown": breakdown,
-        }
+        await log_analytics(tg_id, access, "QUIZ_SUBMIT", doc_id, item["file_name"], item["subject"], f"{score}/{graded} ({pct}%)")
+        return {"ok": True, "score": score, "total_graded": graded, "percentage": pct, "trial_limited": trial_limited, "breakdown": breakdown}
 
     # --- STUDY PLANS & PROGRESS ---
     @router.get("/api/study-plans")
@@ -672,18 +867,11 @@ def create_webapp_router(
         trial_limited = access["tier"] == "TRIAL"
         plans = []
         for p in STUDY_PLAN_TEMPLATES:
-            tasks = [
-                {"id": t["id"], "label": t["label"], "locked": trial_limited and idx >= 3}
-                for idx, t in enumerate(p["tasks"])
-            ]
+            tasks = [{"id": t["id"], "label": t["label"], "locked": trial_limited and idx >= 3} for idx, t in enumerate(p["tasks"])]
             plans.append({
-                "id": p["id"],
-                "title": p["title"],
-                "stream": p["stream"],
-                "grade": p["grade"],
-                "description": p["description"],
-                "trial_limited": trial_limited,
-                "tasks": tasks,
+                "id": p["id"], "title": p["title"], "stream": p["stream"],
+                "grade": p["grade"], "description": p["description"],
+                "trial_limited": trial_limited, "tasks": tasks,
             })
         return {"ok": True, "plans": plans, "trial_limited": trial_limited}
 
@@ -692,7 +880,7 @@ def create_webapp_router(
         tg_id, _ = await require_session(request)
 
         def _load():
-            _, _, _, _, _, prog_sheet = get_all_worksheets_fn()
+            _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
             for row in prog_sheet.get_all_values()[1:]:
                 r = row + [""] * (6 - len(row))
                 if r[0].strip() == str(tg_id):
@@ -713,15 +901,12 @@ def create_webapp_router(
         now_str = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
 
         def _save():
-            _, _, _, _, _, prog_sheet = get_all_worksheets_fn()
+            _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
             rows = prog_sheet.get_all_values()
             new_row = [
-                str(tg_id),
-                json.dumps(body.get("bookmarks", [])),
-                json.dumps(body.get("last_read", {})),
-                json.dumps(body.get("plan_progress", {})),
-                json.dumps(body.get("custom_plan", [])),
-                now_str,
+                str(tg_id), json.dumps(body.get("bookmarks", [])),
+                json.dumps(body.get("last_read", {})), json.dumps(body.get("plan_progress", {})),
+                json.dumps(body.get("custom_plan", [])), now_str,
             ]
             for idx, row in enumerate(rows[1:], start=2):
                 if row and row[0].strip() == str(tg_id):
@@ -744,8 +929,8 @@ def create_webapp_router(
         await get_ptb_app().bot.send_message(
             chat_id=admin_user_id,
             text=(
-                f"📩 <b>MATERIAL REQUEST FROM STUDENT</b>\n\n"
-                f"👤 <b>Student:</b> {html.escape(access.get('name', 'Student'))} ({html.escape(access.get('grade', ''))})\n"
+                f"📩 <b>MATERIAL REQUEST FROM {access.get('role','student').upper()}</b>\n\n"
+                f"👤 <b>Name:</b> {html.escape(access.get('name', 'Student'))} ({html.escape(access.get('grade', ''))})\n"
                 f"📞 <code>{html.escape(access.get('phone', ''))}</code> | 🆔 <code>{tg_id}</code>\n"
                 f"📚 <b>Subject:</b> {html.escape(subject or 'General')}\n"
                 f"📝 <b>Request:</b> {html.escape(details)}"
