@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, quote
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -459,178 +459,188 @@ def create_webapp_router(
 
     @router.post("/api/auth")
     async def api_auth(request: Request):
-        body = await request.json()
-        user = verify_telegram_init_data(body.get("initData", ""))
-        if not user:
-            return {"ok": False, "status": "OUTSIDE_TELEGRAM"}
+        try:
+            body = await request.json()
+            user = verify_telegram_init_data(body.get("initData", ""))
+            if not user:
+                return {"ok": False, "status": "OUTSIDE_TELEGRAM"}
 
-        tg_id = int(user["id"])
-        access = await get_user_access(tg_id)
-        if not access["registered"] and not access["is_admin"]:
+            tg_id = int(user["id"])
+            access = await get_user_access(tg_id)
+            if not access["registered"] and not access["is_admin"]:
+                return {
+                    "ok": False,
+                    "status": "NOT_REGISTERED",
+                    "tg_first_name": user.get("first_name", ""),
+                }
+
+            cfg = await get_config()
+            token = create_session_token(tg_id)
+            days_left = None
+            if access.get("expires_on"):
+                try:
+                    exp = datetime.strptime(access["expires_on"], "%Y-%m-%d").date()
+                    days_left = (exp - datetime.now(eat_tz).date()).days
+                except ValueError:
+                    pass
+
             return {
-                "ok": False,
-                "status": "NOT_REGISTERED",
-                "tg_first_name": user.get("first_name", ""),
+                "ok": True,
+                "status": access["status"],
+                "tier": access["tier"],
+                "launch_mode": access["launch_mode"],
+                "role": access["role"],
+                "name": access["name"],
+                "grade": access["grade"],
+                "stream": access["stream"],
+                "lang": access.get("lang", "en"),
+                "is_admin": access["is_admin"],
+                "days_left": days_left,
+                "referral_code": access.get("referral_code", ""),
+                "referral_count": access.get("referral_count", 0),
+                "sibling_discount": access.get("sibling_discount", False),
+                "children": access.get("children", []),
+                "reports": access.get("reports", []),
+                "countdown": compute_countdown(access["grade"], cfg),
+                "bot_username": get_bot_username(),
+                "token": token,
             }
-
-        cfg = await get_config()
-        token = create_session_token(tg_id)
-        days_left = None
-        if access.get("expires_on"):
-            try:
-                exp = datetime.strptime(access["expires_on"], "%Y-%m-%d").date()
-                days_left = (exp - datetime.now(eat_tz).date()).days
-            except ValueError:
-                pass
-
-        return {
-            "ok": True,
-            "status": access["status"],
-            "tier": access["tier"],
-            "launch_mode": access["launch_mode"],
-            "role": access["role"],
-            "name": access["name"],
-            "grade": access["grade"],
-            "stream": access["stream"],
-            "lang": access.get("lang", "en"),
-            "is_admin": access["is_admin"],
-            "days_left": days_left,
-            "referral_code": access.get("referral_code", ""),
-            "referral_count": access.get("referral_count", 0),
-            "sibling_discount": access.get("sibling_discount", False),
-            "children": access.get("children", []),
-            "reports": access.get("reports", []),
-            "countdown": compute_countdown(access["grade"], cfg),
-            "bot_username": get_bot_username(),
-            "token": token,
-        }
+        except Exception as e:
+            logger.exception("Auth failed")
+            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
 
     @router.post("/api/register")
     async def api_register(request: Request):
-        body = await request.json()
-        user = verify_telegram_init_data(body.get("initData", ""))
-        if not user:
-            raise HTTPException(status_code=401, detail="Open inside Telegram to register")
-
-        tg_id = int(user["id"])
-        existing = await get_user_access(tg_id)
-        if existing["registered"]:
-            return {"ok": True, "already_registered": True}
-
-        role = "parent" if body.get("role") == "parent" else "student"
-        lang = "am" if body.get("lang") == "am" else "en"
-        full_name = (body.get("full_name") or "").strip()
-        phone = (body.get("phone") or "").strip()
-        prog_format = (body.get("format") or "Weekend Hub").strip()
-        entered_ref = (body.get("referral_code") or "").strip().upper()
-        children = body.get("children") or []
-
-        if not full_name or not phone:
-            raise HTTPException(status_code=400, detail="Name and phone are required")
-        if not children:
-            raise HTTPException(status_code=400, detail="At least one student/grade is required")
-
-        my_ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-        timestamp = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
-
-        def _write_registration():
-            reg_sheet, _, _, _, cfg_sheet, _, students_sheet, _ = get_all_worksheets_fn()
-            reg_rows = reg_sheet.get_all_values()
-
-            valid_ref_code, referrer_name = "", ""
-            if entered_ref:
-                for rr in reg_rows[1:]:
-                    rp = rr + [""] * (18 - len(rr))
-                    if rp[12].strip().upper() == entered_ref and rp[6].strip() != str(tg_id):
-                        valid_ref_code = entered_ref
-                        referrer_name = rp[1]
-                        break
-
-            next_id = max(1, len(reg_rows))
-            has_sibling_discount = (role == "parent") and (len(children) >= 2)
-
-            if role == "student":
-                ch = children[0]
-                grade_val = ch.get("grade", "Grade 12")
-                stream_val = ch.get("stream", "General") if grade_val in ("Grade 11", "Grade 12") else "General"
-                ch_fmt = ch.get("format", prog_format)
-            else:
-                grade_val = children[0].get("grade", "Grade 12") if len(children) == 1 else f"Parent ({len(children)} kids)"
-                stream_val = children[0].get("stream", "General") if len(children) == 1 else "General"
-                ch_fmt = prog_format
-
-            reg_sheet.append_row([
-                next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
-                "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
-                role, ch_fmt, lang,
-            ])
-
-            stu_rows_to_add, created_children = [], []
-            for ch in children:
-                stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
-                c_name = (ch.get("name") or full_name).strip()
-                c_grade = ch.get("grade", "Grade 12")
-                c_stream = ch.get("stream", "General") if c_grade in ("Grade 11", "Grade 12") else "General"
-                c_fmt = ch.get("format", prog_format)
-                c_contact = (ch.get("child_contact") or "").strip()
-                link_tok = f"child_{uuid.uuid4().hex[:8]}" if role == "parent" else ""
-                child_tg = str(tg_id) if role == "student" else ""
-                parent_tg = str(tg_id) if role == "parent" else ""
-
-                stu_rows_to_add.append([
-                    stu_id, c_name, c_grade, c_stream, c_fmt,
-                    parent_tg, child_tg, c_contact, link_tok,
-                    "YES" if has_sibling_discount else "NO", timestamp,
-                ])
-                created_children.append({
-                    "student_id": stu_id, "student_name": c_name, "grade": c_grade,
-                    "stream": c_stream, "format": c_fmt, "child_contact": c_contact, "link_token": link_tok,
-                })
-
-            if stu_rows_to_add:
-                students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED")
-
-            launch_mode = "OPEN_LAUNCH"
-            for cr in cfg_sheet.get_all_values()[1:]:
-                if len(cr) >= 2 and cr[0].strip() == "LAUNCH_MODE":
-                    launch_mode = cr[1].strip()
-            return valid_ref_code, referrer_name, has_sibling_discount, created_children, launch_mode
-
-        valid_ref, ref_name, sibling_disc, created_children, launch_mode = await asyncio.to_thread(_write_registration)
-        invalidate_reg_cache()
-
-        bot_user = get_bot_username()
-        child_lines = []
-        for ch in created_children:
-            inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
-            c_txt = f"• <b>{html.escape(ch['student_name'])}</b> — {html.escape(ch['grade'])}"
-            if ch["stream"] != "General":
-                c_txt += f" ({ch['stream']})"
-            if ch["child_contact"]:
-                c_txt += f"\n  📲 Child TG/Contact: <code>{html.escape(ch['child_contact'])}</code>"
-            if inv:
-                c_txt += f"\n  🔗 Child Invite Link: {inv}"
-            child_lines.append(c_txt)
-
-        admin_msg = (
-            f"🚨 <b>NEW {role.upper()} REGISTRATION (Mini App)</b>\n\n"
-            f"👤 <b>Name:</b> {html.escape(full_name)}\n"
-            f"📞 <b>Phone:</b> <code>{html.escape(phone)}</code>\n"
-            f"🆔 <code>{tg_id}</code> | 🔑 Code: <code>{my_ref_code}</code>\n"
-            f"{'🎉 <b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)!</b>\n' if sibling_disc else ''}"
-            f"{f'🤝 <b>Referred by:</b> {html.escape(ref_name)} (<code>{valid_ref}</code>)\n' if valid_ref else ''}\n"
-            f"<b>Students:</b>\n" + "\n".join(child_lines)
-        )
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_user:{tg_id}"),
-        ]])
         try:
-            await get_ptb_app().bot.send_message(chat_id=admin_user_id, text=admin_msg, reply_markup=kb, parse_mode="HTML")
-        except Exception as e:
-            logger.warning(f"Failed notifying admin: {e}")
+            body = await request.json()
+            user = verify_telegram_init_data(body.get("initData", ""))
+            if not user:
+                raise HTTPException(status_code=401, detail="Open inside Telegram to register")
 
-        return {"ok": True, "referral_code": my_ref_code, "sibling_discount": sibling_disc, "launch_mode": launch_mode}
+            tg_id = int(user["id"])
+            existing = await get_user_access(tg_id)
+            if existing["registered"]:
+                return {"ok": True, "already_registered": True}
+
+            role = "parent" if body.get("role") == "parent" else "student"
+            lang = "am" if body.get("lang") == "am" else "en"
+            full_name = (body.get("full_name") or "").strip()
+            phone = (body.get("phone") or "").strip()
+            prog_format = (body.get("format") or "Weekend Hub").strip()
+            entered_ref = (body.get("referral_code") or "").strip().upper()
+            children = body.get("children") or []
+
+            if not full_name or not phone:
+                raise HTTPException(status_code=400, detail="Name and phone are required")
+            if not children:
+                raise HTTPException(status_code=400, detail="At least one student/grade is required")
+
+            my_ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+            timestamp = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
+
+            def _write_registration():
+                reg_sheet, _, _, _, cfg_sheet, _, students_sheet, _ = get_all_worksheets_fn()
+                reg_rows = reg_sheet.get_all_values()
+
+                valid_ref_code, referrer_name = "", ""
+                if entered_ref:
+                    for rr in reg_rows[1:]:
+                        rp = rr + [""] * (18 - len(rr))
+                        if rp[12].strip().upper() == entered_ref and rp[6].strip() != str(tg_id):
+                            valid_ref_code = entered_ref
+                            referrer_name = rp[1]
+                            break
+
+                next_id = max(1, len(reg_rows))
+                has_sibling_discount = (role == "parent") and (len(children) >= 2)
+
+                if role == "student":
+                    ch = children[0]
+                    grade_val = ch.get("grade", "Grade 12")
+                    stream_val = ch.get("stream", "General") if grade_val in ("Grade 11", "Grade 12") else "General"
+                    ch_fmt = ch.get("format", prog_format)
+                else:
+                    grade_val = children[0].get("grade", "Grade 12") if len(children) == 1 else f"Parent ({len(children)} kids)"
+                    stream_val = children[0].get("stream", "General") if len(children) == 1 else "General"
+                    ch_fmt = prog_format
+
+                reg_sheet.append_row([
+                    next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
+                    "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
+                    role, ch_fmt, lang,
+                ])
+
+                stu_rows_to_add, created_children = [], []
+                for ch in children:
+                    stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
+                    c_name = (ch.get("name") or full_name).strip()
+                    c_grade = ch.get("grade", "Grade 12")
+                    c_stream = ch.get("stream", "General") if c_grade in ("Grade 11", "Grade 12") else "General"
+                    c_fmt = ch.get("format", prog_format)
+                    c_contact = (ch.get("child_contact") or "").strip()
+                    link_tok = f"child_{uuid.uuid4().hex[:8]}" if role == "parent" else ""
+                    child_tg = str(tg_id) if role == "student" else ""
+                    parent_tg = str(tg_id) if role == "parent" else ""
+
+                    stu_rows_to_add.append([
+                        stu_id, c_name, c_grade, c_stream, c_fmt,
+                        parent_tg, child_tg, c_contact, link_tok,
+                        "YES" if has_sibling_discount else "NO", timestamp,
+                    ])
+                    created_children.append({
+                        "student_id": stu_id, "student_name": c_name, "grade": c_grade,
+                        "stream": c_stream, "format": c_fmt, "child_contact": c_contact, "link_token": link_tok,
+                    })
+
+                if stu_rows_to_add:
+                    students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED")
+
+                launch_mode = "OPEN_LAUNCH"
+                for cr in cfg_sheet.get_all_values()[1:]:
+                    if len(cr) >= 2 and cr[0].strip() == "LAUNCH_MODE":
+                        launch_mode = cr[1].strip()
+                return valid_ref_code, referrer_name, has_sibling_discount, created_children, launch_mode
+
+            valid_ref, ref_name, sibling_disc, created_children, launch_mode = await asyncio.to_thread(_write_registration)
+            invalidate_reg_cache()
+
+            bot_user = get_bot_username()
+            child_lines = []
+            for ch in created_children:
+                inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
+                c_txt = f"• <b>{html.escape(ch['student_name'])}</b> — {html.escape(ch['grade'])}"
+                if ch["stream"] != "General":
+                    c_txt += f" ({ch['stream']})"
+                if ch["child_contact"]:
+                    c_txt += f"\n  📲 Child TG/Contact: <code>{html.escape(ch['child_contact'])}</code>"
+                if inv:
+                    c_txt += f"\n  🔗 Child Invite Link: {inv}"
+                child_lines.append(c_txt)
+
+            admin_msg = (
+                f"🚨 <b>NEW {role.upper()} REGISTRATION (Mini App)</b>\n\n"
+                f"👤 <b>Name:</b> {html.escape(full_name)}\n"
+                f"📞 <b>Phone:</b> <code>{html.escape(phone)}</code>\n"
+                f"🆔 <code>{tg_id}</code> | 🔑 Code: <code>{my_ref_code}</code>\n"
+                f"{'🎉 <b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)!</b>\n' if sibling_disc else ''}"
+                f"{f'🤝 <b>Referred by:</b> {html.escape(ref_name)} (<code>{valid_ref}</code>)\n' if valid_ref else ''}\n"
+                f"<b>Students:</b>\n" + "\n".join(child_lines)
+            )
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_user:{tg_id}"),
+            ]])
+            try:
+                await get_ptb_app().bot.send_message(chat_id=admin_user_id, text=admin_msg, reply_markup=kb, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"Failed notifying admin: {e}")
+
+            return {"ok": True, "referral_code": my_ref_code, "sibling_discount": sibling_disc, "launch_mode": launch_mode}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Registration failed")
+            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
 
     @router.post("/api/set-lang")
     async def api_set_lang(request: Request):
