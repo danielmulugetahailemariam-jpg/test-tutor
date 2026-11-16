@@ -1,10 +1,10 @@
 import os
-import threading
 import json
 import html
 import uuid
 import asyncio
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from urllib.parse import quote
@@ -98,6 +98,10 @@ logger = logging.getLogger(__name__)
 PENDING_BROADCASTS = {}
 billing_task = None
 
+_SHEETS_LOCK = threading.Lock()
+_SHEETS_READY = False
+_CACHED_SHEET_ID = None
+
 
 def get_credentials() -> Credentials:
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
@@ -127,28 +131,72 @@ def get_or_create_worksheet(sheet_doc, title: str, headers: list[str], defaults:
     return ws
 
 
+def _get_spreadsheet(client):
+    global _CACHED_SHEET_ID
+    if _CACHED_SHEET_ID:
+        try:
+            return client.open_by_key(_CACHED_SHEET_ID)
+        except Exception:
+            _CACHED_SHEET_ID = None
+    doc = client.open(SHEET_NAME)
+    _CACHED_SHEET_ID = doc.id
+    return doc
+
+
+def _ensure_all_tabs_once(sheet_doc):
+    global _SHEETS_READY
+    if _SHEETS_READY:
+        return
+    with _SHEETS_LOCK:
+        if _SHEETS_READY:
+            return
+        get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
+        get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Exam_Keys", KEY_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
+        get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
+        _SHEETS_READY = True
+
+
 def get_sheets():
-    creds = get_credentials()
-    client = gspread.authorize(creds)
-    sheet_doc = client.open(SHEET_NAME)
-    reg_sheet = get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
-    pdf_sheet = get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
-    return reg_sheet, pdf_sheet
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
 
 
 def get_all_worksheets():
-    creds = get_credentials()
-    client = gspread.authorize(creds)
-    sheet_doc = client.open(SHEET_NAME)
-    reg_sheet = get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
-    pdf_sheet = get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
-    keys_sheet = get_or_create_worksheet(sheet_doc, "Exam_Keys", KEY_HEADERS)
-    analytics_sheet = get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
-    config_sheet = get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
-    progress_sheet = get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
-    students_sheet = get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
-    reports_sheet = get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
-    return reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, config_sheet, progress_sheet, students_sheet, reports_sheet
+    global _SHEETS_READY
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    try:
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
+    except gspread.WorksheetNotFound:
+        _SHEETS_READY = False
+        _ensure_all_tabs_once(sheet_doc)
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
 
 
 def get_config_dict(config_sheet=None) -> dict:
@@ -1012,7 +1060,6 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
             ans_cache[doc_id] = await asyncio.to_thread(analyze_answer_pdf, b) if b else None
         return ans_cache[doc_id]
 
-    # 1. Verify existing filename-linked pairs
     for doc_id, (row_idx, r) in by_id.items():
         cat, linked_id, link_status = r[5], r[10], r[20]
         size_mb = float(r[13]) if r[13] else 0.0
@@ -1060,7 +1107,6 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
                     existing_key_ids.add(doc_id)
                     embedded_keys_parsed += 1
 
-    # 2. Smart Content Discovery for unlinked Answer Sheets
     for ans_id, (ans_idx, ans_r) in by_id.items():
         if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
             continue
