@@ -363,6 +363,14 @@ def create_webapp_router(
             return HTMLResponse("<h1>Missing static/index.html</h1>", status_code=500)
         with open(html_path, "r", encoding="utf-8") as f:
             return HTMLResponse(f.read())
+            
+    @router.get("/static/{file_path:path}")
+    async def serve_static_asset(file_path: str):
+        static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
+        full_path = os.path.abspath(os.path.join(static_dir, file_path))
+        if not full_path.startswith(static_dir) or not os.path.isfile(full_path):
+            raise HTTPException(status_code=404, detail="Asset not found")
+        return FileResponse(full_path)
 
     @router.post("/api/auth")
     async def api_auth(request: Request):
