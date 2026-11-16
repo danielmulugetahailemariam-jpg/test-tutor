@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Bishoftu Tutoring Hub — Study Library</title>
+  <title>Qelal / Bishoftu Study Hub</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <style>
@@ -22,11 +22,16 @@
       background: var(--bg);
       color: var(--text);
       line-height: 1.4;
-      padding-bottom: 32px;
+      padding-bottom: 40px;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
+    @media print {
+      body { display: none !important; }
     }
     .hidden { display: none !important; }
 
-    /* Status / Gate Screen */
     .gate-box {
       max-width: 420px;
       margin: 60px auto;
@@ -40,31 +45,83 @@
     .gate-box h2 { margin-bottom: 8px; font-size: 20px; }
     .gate-box p { color: var(--hint); font-size: 14px; }
 
-    /* Header & Search */
     .topbar {
       position: sticky;
       top: 0;
       z-index: 20;
       background: var(--bg);
-      padding: 12px 14px 10px;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--border);
     }
     .topbar-head {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
+      gap: 6px;
     }
-    .topbar-title { font-size: 17px; font-weight: 700; }
+    .topbar-title { font-size: 15px; font-weight: 700; }
+    .head-pills { display: flex; gap: 5px; align-items: center; }
     .user-badge {
-      font-size: 12px;
-      padding: 3px 9px;
+      font-size: 11px;
+      padding: 3px 8px;
       border-radius: 999px;
       background: var(--card);
       color: var(--accent);
       font-weight: 600;
       border: 1px solid var(--border);
+      white-space: nowrap;
     }
+    .ref-pill {
+      font-size: 11px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: none;
+      background: rgba(245, 158, 11, 0.18);
+      color: #b45309;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .banner {
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 12px;
+      margin-bottom: 7px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .banner-countdown { background: rgba(36, 129, 204, 0.12); color: var(--accent); font-weight: 600; }
+    .banner-trial { background: rgba(245, 158, 11, 0.16); color: #b45309; font-weight: 600; }
+    .banner-launch { background: rgba(34, 197, 94, 0.14); color: #15803d; font-weight: 600; }
+
+    .quick-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .q-btn {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 4px;
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .q-btn.quiz { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; border: none; }
+    .q-btn span.ico { font-size: 16px; }
+
     .search-input {
       width: 100%;
       padding: 10px 14px;
@@ -75,20 +132,15 @@
       font-size: 14px;
       outline: none;
     }
-    .filters-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 8px;
-      margin-top: 8px;
-    }
+    .filters-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 7px; }
     .filter-select {
       width: 100%;
-      padding: 8px 10px;
+      padding: 7px 9px;
       border-radius: 9px;
       border: 1px solid var(--border);
       background: var(--card);
       color: var(--text);
-      font-size: 13px;
+      font-size: 12px;
     }
     .count-bar {
       display: flex;
@@ -98,16 +150,8 @@
       font-size: 12px;
       color: var(--hint);
     }
-    .clear-btn {
-      background: none;
-      border: none;
-      color: var(--accent);
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-    }
+    .clear-btn { background: none; border: none; color: var(--accent); font-size: 12px; font-weight: 600; cursor: pointer; }
 
-    /* Cards */
     .list { padding: 6px 14px; display: flex; flex-direction: column; gap: 10px; }
     .card {
       background: var(--card);
@@ -115,16 +159,14 @@
       border-radius: 13px;
       padding: 12px 14px;
     }
-    .card-title {
-      font-size: 14px;
-      font-weight: 600;
-      word-break: break-word;
-      margin-bottom: 8px;
-    }
+    .card.locked { opacity: 0.85; }
+    .card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 7px; }
+    .card-title { font-size: 14px; font-weight: 600; word-break: break-word; flex: 1; }
+    .star-btn { background: none; border: none; font-size: 18px; cursor: pointer; padding: 0 2px; }
     .badges { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
     .badge {
       font-size: 11px;
-      padding: 3px 8px;
+      padding: 2px 7px;
       border-radius: 6px;
       background: rgba(36, 129, 204, 0.12);
       color: var(--accent);
@@ -132,26 +174,29 @@
     }
     .badge.green { background: rgba(34, 197, 94, 0.14); color: #16a34a; }
     .badge.amber { background: rgba(245, 158, 11, 0.15); color: #d97706; }
+    .badge.red { background: rgba(239, 68, 68, 0.14); color: #dc2626; }
     .badge.gray { background: rgba(128, 128, 128, 0.14); color: var(--hint); }
 
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 7px; }
     .btn {
       flex: 1;
-      min-width: 110px;
-      padding: 9px 12px;
+      min-width: 100px;
+      padding: 9px 10px;
       border-radius: 9px;
       border: none;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
+      gap: 5px;
     }
     .btn-primary { background: var(--accent); color: var(--accent-text); }
     .btn-secondary { background: rgba(128, 128, 128, 0.14); color: var(--text); }
     .btn-answer { background: #16a34a; color: #fff; }
+    .btn-quiz { background: #7c3aed; color: #fff; }
+    .btn-locked { background: rgba(245, 158, 11, 0.18); color: #b45309; }
     .load-more {
       margin: 14px auto;
       display: block;
@@ -164,7 +209,45 @@
       cursor: pointer;
     }
 
-    /* Fullscreen PDF Reader Modal */
+    .modal-full {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-head h3 { flex: 1; font-size: 16px; }
+    .modal-body { flex: 1; overflow-y: auto; padding: 14px; }
+
+    .plan-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .task-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .task-row:last-child { border-bottom: none; }
+    .task-row input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); }
+    .task-done { text-decoration: line-through; color: var(--hint); }
+
     .reader-modal {
       position: fixed;
       inset: 0;
@@ -177,14 +260,14 @@
     .reader-header {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 10px 12px;
+      gap: 6px;
+      padding: 9px 10px;
       background: #15191e;
       border-bottom: 1px solid rgba(255,255,255,0.1);
     }
     .reader-title {
       flex: 1;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
@@ -193,30 +276,29 @@
     .r-btn {
       border: none;
       border-radius: 7px;
-      padding: 6px 10px;
-      font-size: 12px;
+      padding: 6px 9px;
+      font-size: 11px;
       font-weight: 600;
       cursor: pointer;
-      background: rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.14);
       color: #fff;
     }
     .r-btn.answer-toggle { background: #16a34a; }
     .r-btn.answer-toggle.active { background: #f59e0b; color: #111; }
-
+    .r-btn.quiz-toggle { background: #7c3aed; }
     .reader-toolbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 6px 12px;
+      padding: 6px 10px;
       background: #1b2027;
       border-bottom: 1px solid rgba(255,255,255,0.08);
       font-size: 12px;
-      gap: 6px;
     }
-    .page-controls { display: flex; align-items: center; gap: 6px; }
+    .page-controls { display: flex; align-items: center; gap: 5px; }
     .page-input {
-      width: 48px;
-      padding: 4px;
+      width: 44px;
+      padding: 3px;
       text-align: center;
       border-radius: 5px;
       border: 1px solid rgba(255,255,255,0.25);
@@ -230,7 +312,7 @@
       display: flex;
       justify-content: center;
       align-items: flex-start;
-      padding: 12px;
+      padding: 10px;
       position: relative;
       -webkit-overflow-scrolling: touch;
     }
@@ -238,21 +320,63 @@
       background: #fff;
       box-shadow: 0 4px 24px rgba(0,0,0,0.45);
       max-width: none;
+      pointer-events: none;
     }
     .reader-loading {
       position: absolute;
       top: 40%;
       left: 50%;
       transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.75);
+      background: rgba(0,0,0,0.8);
       padding: 12px 18px;
       border-radius: 10px;
       font-size: 13px;
     }
+
+    .bubble-panel {
+      height: 42vh;
+      background: #111827;
+      border-top: 2px solid #7c3aed;
+      display: flex;
+      flex-direction: column;
+    }
+    .bubble-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 12px;
+      background: #1e1b4b;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .bubble-grid { flex: 1; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+    .b-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 8px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .b-opts { display: flex; gap: 6px; }
+    .b-opt {
+      width: 34px;
+      height: 28px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.3);
+      background: transparent;
+      color: #fff;
+      font-weight: 700;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .b-opt.selected { background: #7c3aed; border-color: #a78bfa; }
+
     .reader-footer {
       display: flex;
       gap: 8px;
-      padding: 8px 12px;
+      padding: 8px 10px;
       background: #15191e;
       border-top: 1px solid rgba(255,255,255,0.1);
     }
@@ -266,28 +390,66 @@
       padding: 10px 16px;
       border-radius: 10px;
       font-size: 13px;
-      z-index: 200;
+      z-index: 250;
       box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+      text-align: center;
+      max-width: 90%;
+    }
+    .field-input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .ref-code-box {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-align: center;
+      padding: 12px;
+      border: 2px dashed var(--accent);
+      border-radius: 12px;
+      margin: 10px 0;
+      color: var(--accent);
     }
   </style>
 </head>
-<body>
+<body oncontextmenu="return false;">
 
-  <!-- Loading / Gate View -->
+  <!-- Gate -->
   <div id="gateView" class="gate-box">
     <div class="gate-icon" id="gateIcon">⏳</div>
-    <h2 id="gateTitle">Connecting to Bishoftu Tutoring Hub...</h2>
+    <h2 id="gateTitle">Connecting to Qelal Study Hub...</h2>
     <p id="gateMessage">Verifying your Telegram account.</p>
   </div>
 
-  <!-- Main Library View -->
+  <!-- Main View -->
   <div id="libraryView" class="hidden">
     <div class="topbar">
       <div class="topbar-head">
-        <div class="topbar-title">📚 Study Library</div>
-        <div class="user-badge" id="userBadge">Approved</div>
+        <div class="topbar-title" id="welcomeTitle">📚 Study Hub</div>
+        <div class="head-pills">
+          <button id="openReferralBtn" class="ref-pill">🎁 Invite (<span id="refCountBadge">0</span>)</button>
+          <div class="user-badge" id="userBadge">Member</div>
+        </div>
       </div>
-      <input type="search" id="searchInput" class="search-input" placeholder="Search exam, textbook, year, code (e.g. 2017 bio)..." />
+
+      <div id="countdownBanner" class="banner banner-countdown hidden"></div>
+      <div id="modeBanner" class="banner hidden"></div>
+
+      <!-- Quick Action Bar ABOVE Search -->
+      <div class="quick-bar">
+        <button id="openQuizHubBtn" class="q-btn quiz"><span class="ico">🎯</span>Quiz Me</button>
+        <button id="openStudyPlanBtn" class="q-btn"><span class="ico">📅</span>Study Plan</button>
+        <button id="openSavedBtn" class="q-btn"><span class="ico">⭐</span>Saved</button>
+        <button id="openRequestBtn" class="q-btn"><span class="ico">📩</span>Request</button>
+      </div>
+
+      <input type="search" id="searchInput" class="search-input" placeholder="Search exam, textbook, year (e.g. 2017 bio)..." />
       <div class="filters-grid">
         <select id="gradeFilter" class="filter-select"><option value="">All Grades</option></select>
         <select id="streamFilter" class="filter-select"><option value="">All Streams</option></select>
@@ -299,8 +461,8 @@
     <div class="count-bar">
       <span id="resultCount">Loading...</span>
       <div>
-        <button id="refreshBtn" class="clear-btn hidden" style="margin-right:10px;">🔄 Sync Cache</button>
-        <button id="clearFiltersBtn" class="clear-btn">Reset Filters</button>
+        <button id="refreshBtn" class="clear-btn hidden" style="margin-right:10px;">🔄 Refresh</button>
+        <button id="clearFiltersBtn" class="clear-btn">Show All Grades</button>
       </div>
     </div>
 
@@ -308,11 +470,86 @@
     <button id="loadMoreBtn" class="load-more hidden">Show More</button>
   </div>
 
-  <!-- In-App PDF Reader Modal -->
+  <!-- Referral Program Modal -->
+  <div id="referralModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="r-btn" style="background:var(--border);color:var(--text);" onclick="closeModal('referralModal')">← Back</button>
+      <h3>🎁 Study Squad Referral Program</h3>
+    </div>
+    <div class="modal-body">
+      <div class="plan-card">
+        <h4>Your Personal Referral Code</h4>
+        <div id="myRefCodeDisplay" class="ref-code-box">QELAL-...</div>
+        <p style="font-size:13px;color:var(--hint);margin-bottom:12px;">
+          Verified Friends Joined: <b id="myRefCountDisplay" style="color:var(--text);">0</b> / 2 for Study Squad Perks
+        </p>
+        <div class="actions">
+          <button id="shareRefTgBtn" class="btn btn-primary">🚀 Share Invite on Telegram</button>
+          <button id="copyRefCodeBtn" class="btn btn-secondary">📋 Copy Code</button>
+        </div>
+      </div>
+      <div class="plan-card">
+        <h4 style="margin-bottom:6px;">How Perks Work</h4>
+        <p style="font-size:13px;color:var(--hint);line-height:1.6;">
+          1. Share your invite link or code with friends &amp; classmates in Bishoftu.<br />
+          2. When <b>2 friends</b> join and get approved using your code, you unlock <b>same-table Study Squad seating</b>, a <b>Bound Formula &amp; Subject Folder</b>, and referral tuition savings!
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quiz Hub Modal -->
+  <div id="quizHubModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="r-btn" style="background:var(--border);color:var(--text);" onclick="closeModal('quizHubModal')">← Back</button>
+      <h3>🎯 Interactive Mock Quizzes</h3>
+    </div>
+    <div class="modal-body">
+      <p id="quizHubHint" style="font-size:13px;color:var(--hint);margin-bottom:12px;"></p>
+      <div id="quizHubList" class="list" style="padding:0;"></div>
+    </div>
+  </div>
+
+  <!-- Study Plans Modal -->
+  <div id="studyPlanModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="r-btn" style="background:var(--border);color:var(--text);" onclick="closeModal('studyPlanModal')">← Back</button>
+      <h3>📅 Study Plans &amp; Checklists</h3>
+    </div>
+    <div class="modal-body" id="studyPlanBody"></div>
+  </div>
+
+  <!-- Saved / Continue Reading Modal -->
+  <div id="savedModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="r-btn" style="background:var(--border);color:var(--text);" onclick="closeModal('savedModal')">← Back</button>
+      <h3>⭐ Saved &amp; Continue Reading</h3>
+    </div>
+    <div class="modal-body" id="savedBody"></div>
+  </div>
+
+  <!-- Request Material Modal -->
+  <div id="requestModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="r-btn" style="background:var(--border);color:var(--text);" onclick="closeModal('requestModal')">← Back</button>
+      <h3>📩 Request a Material</h3>
+    </div>
+    <div class="modal-body">
+      <div class="plan-card">
+        <p style="font-size:13px;color:var(--hint);margin-bottom:10px;">Missing an exam, textbook, or answer key? Send a direct request to the tutoring team.</p>
+        <input id="reqSubject" class="field-input" placeholder="Subject (e.g. Grade 12 Physics)" />
+        <textarea id="reqDetails" class="field-input" rows="4" placeholder="Describe the exam year, unit, or textbook name..."></textarea>
+        <button id="submitReqBtn" class="btn btn-primary" style="width:100%;">Send Request to Admin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- In-App PDF Reader + Integrated Bubble Sheet -->
   <div id="readerModal" class="reader-modal hidden">
     <div class="reader-header">
       <button id="closeReaderBtn" class="r-btn">← Back</button>
       <div class="reader-title" id="readerTitle">Document</div>
+      <button id="toggleQuizBtn" class="r-btn quiz-toggle hidden">🎯 Bubble Sheet</button>
       <button id="toggleAnswerBtn" class="r-btn answer-toggle hidden">🔑 Answer Key</button>
     </div>
     <div class="reader-toolbar">
@@ -327,14 +564,25 @@
         <button id="zoomInBtn" class="r-btn">＋</button>
       </div>
     </div>
+
     <div class="reader-canvas-wrap" id="canvasWrap">
       <canvas id="pdfCanvas"></canvas>
       <div id="readerLoading" class="reader-loading hidden">Loading page...</div>
     </div>
+
+    <div id="bubblePanel" class="bubble-panel hidden">
+      <div class="bubble-bar">
+        <span>📝 <span id="bubbleAnsweredCount">0</span>/<span id="bubbleTotalCount">0</span></span>
+        <span>⏱ <span id="quizTimerText">00:00</span></span>
+        <button id="submitQuizBtn" class="r-btn" style="background:#16a34a;">Submit &amp; Grade</button>
+      </div>
+      <div id="bubbleGrid" class="bubble-grid"></div>
+    </div>
+
     <div class="reader-footer">
-      <button id="readerSendChatBtn" class="btn btn-primary" style="font-size:12px;padding:8px;">📩 Send to Telegram</button>
-      <button id="readerSaveBtn" class="btn btn-secondary" style="font-size:12px;padding:8px;color:#fff;">⬇️ Save PDF</button>
-      <button id="readerOriginalBtn" class="btn btn-secondary hidden" style="font-size:12px;padding:8px;color:#fff;">📊 Original PPTX/DOCX</button>
+      <button id="readerSendChatBtn" class="btn btn-primary" style="font-size:12px;padding:8px;">
+        🔒 Save for Offline Reading (Telegram Only)
+      </button>
     </div>
   </div>
 
@@ -342,40 +590,30 @@
 
   <script>
     pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-
     const tg = window.Telegram.WebApp;
     tg.ready();
     tg.expand();
 
-    let sessionToken = "";
-    let allItems = [];
-    let itemsById = {};
-    let filteredItems = [];
-    let visibleLimit = 30;
-    let isAdmin = false;
+    window.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && ["s", "p", "S", "P"].includes(e.key)) e.preventDefault();
+    });
 
-    // Reader State
-    let readerMainDoc = null;
-    let readerAnswerDoc = null;
-    let showingAnswer = false;
-    let currentPdfDoc = null;
-    let currentPage = 1;
-    let savedMainPage = 1;
-    let savedAnswerPage = 1;
-    let zoomMultiplier = 1.0;
-    let renderTask = null;
+    let sessionToken = "", userProfile = {}, allItems = [], itemsById = {}, filteredItems = [], visibleLimit = 30;
+    let progress = { bookmarks: [], last_read: {}, plan_progress: {}, custom_plan: [] };
+
+    let readerMainDoc = null, readerAnswerDoc = null, showingAnswer = false;
+    let currentPdfDoc = null, currentPage = 1, savedMainPage = 1, savedAnswerPage = 1, zoomMultiplier = 1.0, renderTask = null;
+    let activeQuizMeta = null, quizAnswers = {}, quizTimerInt = null, quizSeconds = 0;
 
     function showToast(msg) {
       const t = document.getElementById("toast");
       t.textContent = msg;
       t.classList.remove("hidden");
-      setTimeout(() => t.classList.add("hidden"), 2800);
+      setTimeout(() => t.classList.add("hidden"), 3000);
     }
-
-    function setGate(icon, title, message) {
-      document.getElementById("gateIcon").textContent = icon;
-      document.getElementById("gateTitle").textContent = title;
-      document.getElementById("gateMessage").textContent = message;
+    function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
 
     async function initApp() {
@@ -386,36 +624,89 @@
           body: JSON.stringify({ initData: tg.initData || "" }),
         });
         const data = await res.json();
-
         if (!data.ok) {
-          if (data.status === "OUTSIDE_TELEGRAM") {
-            setGate("📱", "Open Inside Telegram", "Please launch this Study Library from the bot button inside Telegram.");
-          } else if (data.status === "NOT_REGISTERED") {
-            setGate("📝", "Registration Required", "Please return to the bot chat and send /start to register first.");
-          } else if (data.status === "NEW") {
-            setGate("⏳", `Hi ${data.name}!`, "Your registration is pending admin approval. You will get a message as soon as it is approved.");
-          } else {
-            setGate("🚫", "Access Restricted", "Your registration is not approved. Contact the tutoring hub admin.");
-          }
+          document.getElementById("gateIcon").textContent = data.status === "OUTSIDE_TELEGRAM" ? "📱" : "📝";
+          document.getElementById("gateTitle").textContent = data.status === "OUTSIDE_TELEGRAM" ? "Open Inside Telegram" : "Registration Required";
+          document.getElementById("gateMessage").textContent = data.status === "OUTSIDE_TELEGRAM"
+            ? "Please launch this Study Library from the Telegram bot."
+            : "Please send /start in the bot chat to register in 60 seconds first.";
           return;
         }
 
+        userProfile = data;
         sessionToken = data.token;
-        isAdmin = !!data.is_admin;
-        document.getElementById("userBadge").textContent = data.grade ? `${data.name} • ${data.grade}` : data.name;
-        if (isAdmin) document.getElementById("refreshBtn").classList.remove("hidden");
+        document.getElementById("welcomeTitle").textContent = `👋 Hi, ${data.name.split(" ")[0]}`;
+        document.getElementById("userBadge").textContent = data.stream && data.stream !== "General"
+          ? `${data.grade} • ${data.stream}` : (data.grade || "Member");
+        document.getElementById("refCountBadge").textContent = data.referral_count || 0;
+        if (data.is_admin) document.getElementById("refreshBtn").classList.remove("hidden");
 
-        await loadLibrary(false);
+        const targetDateStr = data.grade === "Grade 8" || data.grade === "Grade 6" ? data.ministry_date : data.matric_date;
+        const examLabel = data.grade === "Grade 8" || data.grade === "Grade 6" ? `${data.grade} Ministry` : "Grade 12 ESSLCE";
+        const diffDays = Math.ceil((new Date(targetDateStr) - new Date()) / 86400000);
+        if (diffDays > 0) {
+          const cb = document.getElementById("countdownBanner");
+          cb.innerHTML = `<span>⏳ <b>${diffDays} Days</b> until ${examLabel}</span><span style="font-size:11px;">Stay consistent!</span>`;
+          cb.classList.remove("hidden");
+        }
+
+        const mb = document.getElementById("modeBanner");
+        if (data.launch_mode === "OPEN_LAUNCH") {
+          mb.className = "banner banner-launch";
+          mb.innerHTML = `<span>🎉 Launch Phase Free Access — Unlimited Library &amp; Quizzes!</span>`;
+          mb.classList.remove("hidden");
+        } else if (data.tier === "TRIAL") {
+          mb.className = "banner banner-trial";
+          mb.innerHTML = `<span>🎁 Trial Mode: 3 Grade Books Unlocked • 300+ unlock on approval</span>`;
+          mb.classList.remove("hidden");
+        } else if (data.days_left !== null && data.days_left <= 7) {
+          mb.className = "banner banner-trial";
+          mb.innerHTML = `<span>⏰ Pass expires in ${Math.max(0, data.days_left)} day(s) — contact us to renew</span>`;
+          mb.classList.remove("hidden");
+        }
+
+        await Promise.all([loadLibrary(false), loadProgress()]);
         document.getElementById("gateView").classList.add("hidden");
         document.getElementById("libraryView").classList.remove("hidden");
-      } catch (err) {
-        setGate("⚠️", "Connection Error", "Could not connect to server. Please try again.");
+      } catch (e) {
+        document.getElementById("gateIcon").textContent = "⚠️";
+        document.getElementById("gateTitle").textContent = "Connection Error";
+        document.getElementById("gateMessage").textContent = "Please try reopening the Mini App.";
       }
     }
 
+    async function loadProgress() {
+      try {
+        const local = localStorage.getItem("qelal_prog");
+        if (local) progress = { ...progress, ...JSON.parse(local) };
+        const res = await fetch("/api/progress", { headers: { Authorization: `Bearer ${sessionToken}` } });
+        const d = await res.json();
+        if (d.ok) {
+          progress = { bookmarks: d.bookmarks || [], last_read: d.last_read || {}, plan_progress: d.plan_progress || {}, custom_plan: d.custom_plan || [] };
+          localStorage.setItem("qelal_prog", JSON.stringify(progress));
+        }
+      } catch {}
+    }
+
+    let saveProgTimer = null;
+    function saveProgressDebounced() {
+      localStorage.setItem("qelal_prog", JSON.stringify(progress));
+      clearTimeout(saveProgTimer);
+      saveProgTimer = setTimeout(async () => {
+        try {
+          await fetch("/api/progress", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+            body: JSON.stringify(progress),
+          });
+        } catch {}
+      }, 900);
+    }
+
     async function loadLibrary(forceRefresh) {
-      const url = forceRefresh ? "/api/library?refresh=true" : "/api/library";
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${sessionToken}` } });
+      const res = await fetch(forceRefresh ? "/api/library?refresh=true" : "/api/library", {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
       const data = await res.json();
       allItems = data.items || [];
       itemsById = {};
@@ -426,23 +717,22 @@
       populateSelect("subjectFilter", uniqueVals("subject"), "All Subjects");
       populateSelect("categoryFilter", uniqueVals("category"), "All Categories");
 
+      if (!forceRefresh) {
+        if (userProfile.grade && uniqueVals("grade").includes(userProfile.grade)) {
+          document.getElementById("gradeFilter").value = userProfile.grade;
+        }
+        if (userProfile.stream && userProfile.stream !== "General" && uniqueVals("stream").includes(userProfile.stream)) {
+          document.getElementById("streamFilter").value = userProfile.stream;
+        }
+      }
       applyFilters();
     }
 
-    function uniqueVals(field) {
-      return [...new Set(allItems.map((i) => i[field]).filter(Boolean))].sort();
-    }
-
+    function uniqueVals(field) { return [...new Set(allItems.map((i) => i[field]).filter(Boolean))].sort(); }
     function populateSelect(id, values, label) {
-      const sel = document.getElementById(id);
-      const prev = sel.value;
+      const sel = document.getElementById(id), prev = sel.value;
       sel.innerHTML = `<option value="">${label}</option>`;
-      values.forEach((v) => {
-        const opt = document.createElement("option");
-        opt.value = v;
-        opt.textContent = v;
-        sel.appendChild(opt);
-      });
+      values.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
       if (values.includes(prev)) sel.value = prev;
     }
 
@@ -454,155 +744,315 @@
       const cat = document.getElementById("categoryFilter").value;
 
       filteredItems = allItems.filter((it) => {
-        if (g && it.grade !== g) return false;
-        if (st && it.stream !== st) return false;
+        if (g) {
+          if (g === "Grade 12" && !["Grade 12", "Grade 9-12", "Grade 11-12"].includes(it.grade)) return false;
+          else if (g !== "Grade 12" && it.grade !== g) return false;
+        }
+        if (st && it.stream !== st && it.stream !== "General") return false;
         if (sub && it.subject !== sub) return false;
         if (cat && it.category !== cat) return false;
         if (q) {
           const hay = `${it.file_name} ${it.subject} ${it.category} ${it.year} ${it.grade} ${it.round_or_code}`.toLowerCase();
-          if (!q.split(/\s+/).every((word) => hay.includes(word))) return false;
+          if (!q.split(/\s+/).every((w) => hay.includes(w))) return false;
         }
         return true;
       });
-
+      filteredItems.sort((a, b) => Number(a.locked) - Number(b.locked));
       visibleLimit = 30;
       renderCards();
     }
 
     function renderCards() {
       const list = document.getElementById("cardList");
-      const countEl = document.getElementById("resultCount");
-      const loadMoreBtn = document.getElementById("loadMoreBtn");
-
-      countEl.textContent = `${filteredItems.length} resource${filteredItems.length === 1 ? "" : "s"} found`;
+      document.getElementById("resultCount").textContent = `${filteredItems.length} resource${filteredItems.length === 1 ? "" : "s"}`;
       list.innerHTML = "";
 
-      const slice = filteredItems.slice(0, visibleLimit);
-      slice.forEach((it) => {
+      filteredItems.slice(0, visibleLimit).forEach((it) => {
         const card = document.createElement("div");
-        card.className = "card";
+        card.className = `card ${it.locked ? "locked" : ""}`;
+        const isStarred = progress.bookmarks.includes(it.doc_id);
+        const lastPg = progress.last_read[it.doc_id]?.page;
 
-        const badgesHtml = [
+        const badges = [
+          it.locked ? `<span class="badge red">🔒 Locked</span>` : (it.is_trial_pick && userProfile.tier === "TRIAL" ? `<span class="badge green">🎁 Free Trial</span>` : ""),
           it.grade ? `<span class="badge">${escapeHtml(it.grade)}</span>` : "",
           it.subject ? `<span class="badge">${escapeHtml(it.subject)}</span>` : "",
           it.category ? `<span class="badge gray">${escapeHtml(it.category)}</span>` : "",
           it.year ? `<span class="badge amber">${escapeHtml(it.year)}</span>` : "",
-          it.round_or_code ? `<span class="badge gray">${escapeHtml(it.round_or_code)}</span>` : "",
-          it.linked_doc_id && it.category !== "Answer Sheet"
-            ? `<span class="badge green">🔑 Answer Linked</span>`
-            : (it.has_embedded_answer === "Yes" && it.category !== "Answer Sheet" ? `<span class="badge green">✔ With Answers</span>` : ""),
-          it.file_size_mb ? `<span class="badge gray">${it.file_size_mb} MB</span>` : "",
+          it.linked_doc_id && it.category !== "Answer Sheet" ? `<span class="badge green">🔑 Answer Key</span>` : "",
+          it.has_quiz ? `<span class="badge" style="background:rgba(124,58,237,0.14);color:#7c3aed;">🎯 Quiz (${it.quiz_total_q} Qs)</span>` : "",
+          lastPg ? `<span class="badge amber">📖 Page ${lastPg}</span>` : "",
         ].join("");
 
         card.innerHTML = `
-          <div class="card-title">${escapeHtml(it.file_name)}</div>
-          <div class="badges">${badgesHtml}</div>
+          <div class="card-top">
+            <div class="card-title">${escapeHtml(it.file_name)}</div>
+            <button class="star-btn" title="Bookmark">${isStarred ? "⭐" : "☆"}</button>
+          </div>
+          <div class="badges">${badges}</div>
           <div class="actions"></div>
         `;
 
+        card.querySelector(".star-btn").onclick = () => {
+          if (progress.bookmarks.includes(it.doc_id)) progress.bookmarks = progress.bookmarks.filter((x) => x !== it.doc_id);
+          else progress.bookmarks.push(it.doc_id);
+          saveProgressDebounced();
+          renderCards();
+        };
+
         const actions = card.querySelector(".actions");
-        if (it.has_pdf) {
-          const readBtn = document.createElement("button");
-          readBtn.className = "btn btn-primary";
-          readBtn.textContent = "📖 Read Here";
-          readBtn.onclick = () => openReader(it, false);
-          actions.appendChild(readBtn);
+        if (it.locked) {
+          const unlockBtn = document.createElement("button");
+          unlockBtn.className = "btn btn-locked";
+          unlockBtn.textContent = "🔒 Unlock on Approval (300+ PDFs)";
+          unlockBtn.onclick = () => showToast("Our representative will contact you to confirm payment and unlock the full library!");
+          actions.appendChild(unlockBtn);
+        } else {
+          if (it.has_pdf) {
+            const readBtn = document.createElement("button");
+            readBtn.className = "btn btn-primary";
+            readBtn.textContent = lastPg ? `📖 Continue (p.${lastPg})` : "📖 Read Here";
+            readBtn.onclick = () => openReader(it, false, false);
+            actions.appendChild(readBtn);
+          }
+          if (it.has_quiz) {
+            const qBtn = document.createElement("button");
+            qBtn.className = "btn btn-quiz";
+            qBtn.textContent = "🎯 Quiz Me";
+            qBtn.onclick = () => openReader(it, false, true);
+            actions.appendChild(qBtn);
+          }
+          if (it.linked_doc_id && itemsById[it.linked_doc_id] && it.category !== "Answer Sheet") {
+            const ansBtn = document.createElement("button");
+            ansBtn.className = "btn btn-answer";
+            ansBtn.textContent = "🔑 Answer";
+            ansBtn.onclick = () => openReader(it, true, false);
+            actions.appendChild(ansBtn);
+          }
+          const sendBtn = document.createElement("button");
+          sendBtn.className = "btn btn-secondary";
+          sendBtn.textContent = "🔒 Offline (TG)";
+          sendBtn.onclick = () => sendOfflineTelegram(it);
+          actions.appendChild(sendBtn);
         }
-
-        if (it.linked_doc_id && itemsById[it.linked_doc_id] && it.category !== "Answer Sheet") {
-          const ansBtn = document.createElement("button");
-          ansBtn.className = "btn btn-answer";
-          ansBtn.textContent = "🔑 Answer Key";
-          ansBtn.onclick = () => openReader(it, true);
-          actions.appendChild(ansBtn);
-        }
-
-        const sendBtn = document.createElement("button");
-        sendBtn.className = "btn btn-secondary";
-        sendBtn.textContent = "📩 Send to Chat";
-        sendBtn.onclick = () => sendToChat(it, it.has_pdf ? "pdf" : "original");
-        actions.appendChild(sendBtn);
-
-        if (it.has_original_office) {
-          const origBtn = document.createElement("button");
-          origBtn.className = "btn btn-secondary";
-          origBtn.textContent = "⬇️ PPTX/DOCX";
-          origBtn.onclick = () => downloadDirect(it, "original");
-          actions.appendChild(origBtn);
-        }
-
         list.appendChild(card);
       });
 
+      const loadMoreBtn = document.getElementById("loadMoreBtn");
       if (filteredItems.length > visibleLimit) {
         loadMoreBtn.classList.remove("hidden");
-        loadMoreBtn.textContent = `Show More (${filteredItems.length - visibleLimit} remaining)`;
-      } else {
-        loadMoreBtn.classList.add("hidden");
-      }
+        loadMoreBtn.textContent = `Show More (${filteredItems.length - visibleLimit} left)`;
+      } else loadMoreBtn.classList.add("hidden");
     }
 
-    function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-    }
-
-    async function sendToChat(item, variant = "pdf") {
-      showToast("Sending to your Telegram chat...");
+    async function sendOfflineTelegram(item) {
+      showToast("Sending protected copy inside your Telegram chat...");
       try {
-        const res = await fetch(`/api/file/${item.doc_id}/send?variant=${variant}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${sessionToken}` },
+        const res = await fetch(`/api/file/${item.doc_id}/send`, {
+          method: "POST", headers: { Authorization: `Bearer ${sessionToken}` },
         });
         const data = await res.json();
-        if (data.ok) {
-          showToast("✅ Sent to your Telegram chat!");
-        } else if (data.too_large_for_bot) {
-          showToast("⚠️ Over 50 MB—starting direct download...");
-          downloadDirect(item, variant);
-        } else {
-          showToast("❌ Could not send file.");
-        }
+        if (data.ok) showToast("🔒 Saved inside Telegram (Offline reading only, cannot be shared/exported)!");
+        else showToast(data.message || "Could not send file.");
       } catch {
-        showToast("❌ Network error sending file.");
+        showToast("❌ Network error.");
       }
     }
 
-    function downloadDirect(item, variant = "pdf") {
-      const dlUrl = `${window.location.origin}/api/file/${item.doc_id}/download?token=${encodeURIComponent(sessionToken)}&variant=${variant}`;
-      let fname = item.file_name;
-      if (variant === "pdf" && !fname.toLowerCase().endsWith(".pdf")) {
-        fname = fname.replace(/\.(pptx|docx)$/i, "") + ".pdf";
+    document.getElementById("openReferralBtn").onclick = () => {
+      document.getElementById("myRefCodeDisplay").textContent = userProfile.referral_code || "Not generated";
+      document.getElementById("myRefCountDisplay").textContent = userProfile.referral_count || 0;
+      document.getElementById("referralModal").classList.remove("hidden");
+    };
+    document.getElementById("copyRefCodeBtn").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(userProfile.referral_code || "");
+        showToast("📋 Referral code copied!");
+      } catch {
+        showToast(`Your code: ${userProfile.referral_code}`);
       }
-      if (tg.downloadFile) {
-        tg.downloadFile({ url: dlUrl, file_name: fname });
-      } else {
-        tg.openLink(dlUrl);
-      }
+    };
+    document.getElementById("shareRefTgBtn").onclick = () => {
+      const code = userProfile.referral_code || "";
+      const botUser = userProfile.bot_username || "";
+      const inviteUrl = botUser ? `https://t.me/${botUser}?start=ref_${code}` : "";
+      const text = `Join me at Qelal / Bishoftu Tutoring Hub for Grades 1-12 Exam Prep, Notes & Quizzes! Use my referral code: ${code}`;
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(text)}`;
+      tg.openTelegramLink(shareUrl);
+    };
+
+    document.getElementById("openQuizHubBtn").onclick = () => {
+      const quizItems = allItems.filter((it) => it.has_quiz);
+      const list = document.getElementById("quizHubList");
+      const hint = document.getElementById("quizHubHint");
+      hint.textContent = userProfile.tier === "TRIAL"
+        ? "Trial Mode: First 10 questions per exam unlocked with instant auto-grading. Unlock full 100+ question exams on approval!"
+        : `Found ${quizItems.length} interactive mock exams with verified answer keys. Tap any exam to start Bubble Sheet + Timer mode!`;
+      list.innerHTML = "";
+      quizItems.forEach((it) => {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <div class="card-title">${escapeHtml(it.file_name)}</div>
+          <div class="badges">
+            <span class="badge">${escapeHtml(it.grade)}</span>
+            <span class="badge">${escapeHtml(it.subject)}</span>
+            <span class="badge" style="background:rgba(124,58,237,0.14);color:#7c3aed;">🎯 ${it.quiz_total_q} Questions</span>
+          </div>
+          <button class="btn btn-quiz" style="width:100%;">🚀 Start Interactive Practice</button>
+        `;
+        card.querySelector("button").onclick = () => { closeModal("quizHubModal"); openReader(it, false, true); };
+        list.appendChild(card);
+      });
+      if (!quizItems.length) list.innerHTML = `<p style="color:var(--hint);font-size:13px;">No parsed quiz keys yet—ask Admin to run /verify_links!</p>`;
+      document.getElementById("quizHubModal").classList.remove("hidden");
+    };
+
+    document.getElementById("openStudyPlanBtn").onclick = async () => {
+      const body = document.getElementById("studyPlanBody");
+      body.innerHTML = "<p style='color:var(--hint);'>Loading study plans...</p>";
+      document.getElementById("studyPlanModal").classList.remove("hidden");
+      const res = await fetch("/api/study-plans", { headers: { Authorization: `Bearer ${sessionToken}` } });
+      const data = await res.json();
+      renderStudyPlans(data.plans || []);
+    };
+
+    function renderStudyPlans(plans) {
+      const body = document.getElementById("studyPlanBody");
+      body.innerHTML = "";
+
+      const customCard = document.createElement("div");
+      customCard.className = "plan-card";
+      customCard.innerHTML = `
+        <h4 style="margin-bottom:6px;">✍️ My Custom Study Plan</h4>
+        <div style="display:flex;gap:6px;margin-bottom:8px;">
+          <input id="customTaskInput" class="field-input" style="margin:0;" placeholder="Add daily goal (e.g. Biology Unit 2 + 20 Qs)" />
+          <button id="addCustomTaskBtn" class="btn btn-primary" style="flex:0 0 auto;">Add</button>
+        </div>
+        <div id="customTaskList"></div>
+      `;
+      body.appendChild(customCard);
+
+      const renderCustomList = () => {
+        const listEl = customCard.querySelector("#customTaskList");
+        listEl.innerHTML = "";
+        (progress.custom_plan || []).forEach((t, idx) => {
+          const row = document.createElement("div");
+          row.className = "task-row";
+          row.innerHTML = `<input type="checkbox" ${t.done ? "checked" : ""} /><span style="flex:1;" class="${t.done ? "task-done" : ""}">${escapeHtml(t.label)}</span><button class="clear-btn" style="color:#dc2626;">✕</button>`;
+          row.querySelector("input").onchange = (e) => { t.done = e.target.checked; saveProgressDebounced(); renderCustomList(); };
+          row.querySelector("button").onclick = () => { progress.custom_plan.splice(idx, 1); saveProgressDebounced(); renderCustomList(); };
+          listEl.appendChild(row);
+        });
+      };
+      renderCustomList();
+      customCard.querySelector("#addCustomTaskBtn").onclick = () => {
+        const inp = customCard.querySelector("#customTaskInput");
+        if (!inp.value.trim()) return;
+        progress.custom_plan = progress.custom_plan || [];
+        progress.custom_plan.push({ label: inp.value.trim(), done: false });
+        inp.value = "";
+        saveProgressDebounced();
+        renderCustomList();
+      };
+
+      const sortedPlans = [...plans].sort((a, b) => (a.stream === userProfile.stream ? -1 : 1));
+      sortedPlans.forEach((p) => {
+        const doneCount = p.tasks.filter((t) => progress.plan_progress[t.id]).length;
+        const card = document.createElement("div");
+        card.className = "plan-card";
+        card.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <h4>${escapeHtml(p.title)}</h4>
+            <span class="badge green">${doneCount}/${p.tasks.length}</span>
+          </div>
+          <p style="font-size:12px;color:var(--hint);margin-bottom:8px;">${escapeHtml(p.description)}</p>
+          <div class="tasks-wrap"></div>
+        `;
+        const wrap = card.querySelector(".tasks-wrap");
+        p.tasks.forEach((t) => {
+          const row = document.createElement("div");
+          row.className = "task-row";
+          if (t.locked) {
+            row.innerHTML = `<span>🔒</span><span style="color:var(--hint);flex:1;">${escapeHtml(t.label)} <i>(Unlock on Approval)</i></span>`;
+          } else {
+            const checked = !!progress.plan_progress[t.id];
+            row.innerHTML = `<input type="checkbox" ${checked ? "checked" : ""} /><span class="${checked ? "task-done" : ""}">${escapeHtml(t.label)}</span>`;
+            row.querySelector("input").onchange = (e) => {
+              progress.plan_progress[t.id] = e.target.checked;
+              saveProgressDebounced();
+              row.querySelector("span").className = e.target.checked ? "task-done" : "";
+            };
+          }
+          wrap.appendChild(row);
+        });
+        body.appendChild(card);
+      });
     }
 
-    // ================= IN-APP PROGRESSIVE PDF READER =================
-    async function openReader(mainItem, startWithAnswer = false) {
+    document.getElementById("openSavedBtn").onclick = () => {
+      const body = document.getElementById("savedBody");
+      body.innerHTML = "<h4 style='margin-bottom:8px;'>🕒 Recently Opened</h4>";
+      const recents = Object.entries(progress.last_read || {}).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0)).slice(0, 6);
+      if (!recents.length) body.innerHTML += "<p style='font-size:13px;color:var(--hint);margin-bottom:14px;'>No recently opened PDFs yet.</p>";
+      recents.forEach(([docId, info]) => {
+        const it = itemsById[docId];
+        if (!it || it.locked) return;
+        const c = document.createElement("div");
+        c.className = "plan-card";
+        c.innerHTML = `<div style="font-weight:600;font-size:13px;margin-bottom:6px;">${escapeHtml(it.file_name)}</div><button class="btn btn-primary" style="width:100%;">📖 Resume Page ${info.page}</button>`;
+        c.querySelector("button").onclick = () => { closeModal("savedModal"); openReader(it, false, false, info.page); };
+        body.appendChild(c);
+      });
+
+      body.innerHTML += "<h4 style='margin:14px 0 8px;'>⭐ Bookmarked Resources</h4>";
+      if (!(progress.bookmarks || []).length) body.innerHTML += "<p style='font-size:13px;color:var(--hint);'>Tap ☆ on any book to bookmark it here.</p>";
+      (progress.bookmarks || []).forEach((docId) => {
+        const it = itemsById[docId];
+        if (!it) return;
+        const c = document.createElement("div");
+        c.className = "plan-card";
+        c.innerHTML = `<div style="font-weight:600;font-size:13px;margin-bottom:6px;">${escapeHtml(it.file_name)}</div><button class="btn btn-secondary" style="width:100%;">${it.locked ? "🔒 Locked" : "📖 Open"}</button>`;
+        if (!it.locked) c.querySelector("button").onclick = () => { closeModal("savedModal"); openReader(it, false, false); };
+        body.appendChild(c);
+      });
+      document.getElementById("savedModal").classList.remove("hidden");
+    };
+
+    document.getElementById("openRequestBtn").onclick = () => document.getElementById("requestModal").classList.remove("hidden");
+    document.getElementById("submitReqBtn").onclick = async () => {
+      const subject = document.getElementById("reqSubject").value.trim();
+      const details = document.getElementById("reqDetails").value.trim();
+      if (!details) return showToast("Please describe what you need.");
+      const res = await fetch("/api/request-material", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({ subject, details }),
+      });
+      if ((await res.json()).ok) {
+        document.getElementById("reqDetails").value = "";
+        closeModal("requestModal");
+        showToast("✅ Request sent to admin!");
+      }
+    };
+
+    async function openReader(mainItem, startWithAnswer = false, startQuiz = false, jumpToPage = null) {
       readerMainDoc = mainItem;
       readerAnswerDoc = (mainItem.linked_doc_id && itemsById[mainItem.linked_doc_id]) ? itemsById[mainItem.linked_doc_id] : null;
       showingAnswer = startWithAnswer && !!readerAnswerDoc;
-      savedMainPage = 1;
+      savedMainPage = jumpToPage || progress.last_read[mainItem.doc_id]?.page || 1;
       savedAnswerPage = 1;
       zoomMultiplier = 1.0;
       document.getElementById("zoomLabel").textContent = "100%";
 
-      const ansToggle = document.getElementById("toggleAnswerBtn");
-      if (readerAnswerDoc) {
-        ansToggle.classList.remove("hidden");
-      } else {
-        ansToggle.classList.add("hidden");
-      }
-
-      const origBtn = document.getElementById("readerOriginalBtn");
-      if (mainItem.has_original_office) origBtn.classList.remove("hidden");
-      else origBtn.classList.add("hidden");
+      document.getElementById("toggleAnswerBtn").classList.toggle("hidden", !readerAnswerDoc);
+      document.getElementById("toggleQuizBtn").classList.toggle("hidden", !mainItem.has_quiz);
+      document.getElementById("bubblePanel").classList.add("hidden");
+      stopQuizTimer();
 
       document.getElementById("readerModal").classList.remove("hidden");
       await loadActiveReaderDoc();
+      if (startQuiz && mainItem.has_quiz) await startBubbleSheetMode(mainItem.doc_id);
     }
 
     async function loadActiveReaderDoc() {
@@ -611,39 +1061,25 @@
 
       const ansToggle = document.getElementById("toggleAnswerBtn");
       if (readerAnswerDoc) {
-        if (showingAnswer) {
-          ansToggle.textContent = "📄 Back to Exam";
-          ansToggle.classList.add("active");
-        } else {
-          ansToggle.textContent = "🔑 Answer Key";
-          ansToggle.classList.remove("active");
-        }
+        ansToggle.textContent = showingAnswer ? "📄 Exam" : "🔑 Answer Key";
+        ansToggle.classList.toggle("active", showingAnswer);
       }
 
       const loadingEl = document.getElementById("readerLoading");
       loadingEl.classList.remove("hidden");
       loadingEl.textContent = "Opening PDF...";
 
-      const streamUrl = `/api/file/${activeDoc.doc_id}/stream?token=${encodeURIComponent(sessionToken)}&variant=pdf`;
+      const streamUrl = `/api/file/${activeDoc.doc_id}/stream?token=${encodeURIComponent(sessionToken)}`;
       try {
-        if (currentPdfDoc) {
-          try { await currentPdfDoc.destroy(); } catch {}
-        }
-        const task = pdfjsLib.getDocument({
-          url: streamUrl,
-          rangeChunkSize: 65536,
-          disableAutoFetch: true,
-          disableStream: true,
-        });
-        currentPdfDoc = await task.promise;
+        if (currentPdfDoc) try { await currentPdfDoc.destroy(); } catch {}
+        currentPdfDoc = await pdfjsLib.getDocument({
+          url: streamUrl, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true,
+        }).promise;
         document.getElementById("pageCount").textContent = currentPdfDoc.numPages;
-
-        currentPage = showingAnswer ? savedAnswerPage : savedMainPage;
-        if (currentPage > currentPdfDoc.numPages) currentPage = 1;
+        currentPage = Math.min(showingAnswer ? savedAnswerPage : savedMainPage, currentPdfDoc.numPages);
         await renderPage(currentPage);
-      } catch (e) {
-        console.error(e);
-        loadingEl.textContent = "Failed to load PDF. Try 'Send to Telegram'.";
+      } catch {
+        loadingEl.textContent = "Could not load PDF. Try 'Save for Offline (Telegram)'.";
       }
     }
 
@@ -652,110 +1088,144 @@
       const loadingEl = document.getElementById("readerLoading");
       loadingEl.classList.remove("hidden");
       loadingEl.textContent = `Loading page ${num}...`;
-
-      if (renderTask) {
-        try { renderTask.cancel(); } catch {}
-      }
+      if (renderTask) try { renderTask.cancel(); } catch {}
 
       const page = await currentPdfDoc.getPage(num);
       const wrap = document.getElementById("canvasWrap");
       const baseViewport = page.getViewport({ scale: 1 });
-      const fitScale = Math.max(0.5, (wrap.clientWidth - 24) / baseViewport.width);
-      const scale = fitScale * zoomMultiplier;
-      const outputScale = window.devicePixelRatio || 1;
-
+      const scale = Math.max(0.5, (wrap.clientWidth - 20) / baseViewport.width) * zoomMultiplier;
+      const dpr = window.devicePixelRatio || 1;
       const viewport = page.getViewport({ scale });
       const canvas = document.getElementById("pdfCanvas");
-      const ctx = canvas.getContext("2d");
 
-      canvas.width = Math.floor(viewport.width * outputScale);
-      canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
       canvas.style.width = `${Math.floor(viewport.width)}px`;
       canvas.style.height = `${Math.floor(viewport.height)}px`;
 
-      const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
-      renderTask = page.render({ canvasContext: ctx, transform, viewport });
+      renderTask = page.render({ canvasContext: canvas.getContext("2d"), transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null, viewport });
       try {
         await renderTask.promise;
         document.getElementById("pageInput").value = num;
         if (showingAnswer) savedAnswerPage = num;
-        else savedMainPage = num;
+        else {
+          savedMainPage = num;
+          progress.last_read[readerMainDoc.doc_id] = { page: num, ts: Date.now() };
+          saveProgressDebounced();
+        }
         wrap.scrollTop = 0;
-      } catch (err) {
-        if (err?.name !== "RenderingCancelledException") console.error(err);
-      } finally {
-        loadingEl.classList.add("hidden");
-      }
+      } catch {}
+      finally { loadingEl.classList.add("hidden"); }
     }
 
-    // UI Listeners
+    async function startBubbleSheetMode(docId) {
+      const panel = document.getElementById("bubblePanel");
+      if (!panel.classList.contains("hidden")) { panel.classList.add("hidden"); stopQuizTimer(); return; }
+      const res = await fetch(`/api/quiz/${docId}`, { headers: { Authorization: `Bearer ${sessionToken}` } });
+      activeQuizMeta = await res.json();
+      quizAnswers = {};
+
+      document.getElementById("bubbleAnsweredCount").textContent = "0";
+      document.getElementById("bubbleTotalCount").textContent = activeQuizMeta.unlocked_q;
+
+      const grid = document.getElementById("bubbleGrid");
+      grid.innerHTML = "";
+      if (activeQuizMeta.trial_limited) {
+        const note = document.createElement("div");
+        note.style.cssText = "font-size:11px;color:#fbbf24;padding:4px 0;";
+        note.textContent = `🎁 Trial Quiz Preview: First ${activeQuizMeta.unlocked_q} of ${activeQuizMeta.total_q} questions unlocked. Complete registration for full exam grading!`;
+        grid.appendChild(note);
+      }
+
+      for (let q = 1; q <= activeQuizMeta.unlocked_q; q++) {
+        const row = document.createElement("div");
+        row.className = "b-row";
+        row.innerHTML = `<span><b>Q${q}</b></span><div class="b-opts"></div>`;
+        const opts = row.querySelector(".b-opts");
+        ["A", "B", "C", "D"].forEach((letter) => {
+          const b = document.createElement("button");
+          b.className = "b-opt";
+          b.textContent = letter;
+          b.onclick = () => {
+            quizAnswers[String(q)] = letter;
+            opts.querySelectorAll(".b-opt").forEach((x) => x.classList.remove("selected"));
+            b.classList.add("selected");
+            document.getElementById("bubbleAnsweredCount").textContent = Object.keys(quizAnswers).length;
+          };
+          opts.appendChild(b);
+        });
+        grid.appendChild(row);
+      }
+      panel.classList.remove("hidden");
+      startQuizTimer();
+    }
+
+    function startQuizTimer() {
+      stopQuizTimer();
+      quizSeconds = 0;
+      quizTimerInt = setInterval(() => {
+        quizSeconds++;
+        const m = String(Math.floor(quizSeconds / 60)).padStart(2, "0");
+        const s = String(quizSeconds % 60).padStart(2, "0");
+        document.getElementById("quizTimerText").textContent = `${m}:${s}`;
+      }, 1000);
+    }
+    function stopQuizTimer() { if (quizTimerInt) { clearInterval(quizTimerInt); quizTimerInt = null; } }
+
+    document.getElementById("submitQuizBtn").onclick = async () => {
+      if (!activeQuizMeta) return;
+      stopQuizTimer();
+      const res = await fetch(`/api/quiz/${activeQuizMeta.doc_id}/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({ answers: quizAnswers }),
+      });
+      const data = await res.json();
+      const grid = document.getElementById("bubbleGrid");
+      grid.innerHTML = `
+        <div style="background:#1e293b;padding:10px;border-radius:10px;margin-bottom:8px;text-align:center;">
+          <div style="font-size:18px;font-weight:800;color:#4ade80;">Score: ${data.score} / ${data.total_graded} (${data.percentage}%)</div>
+          ${data.trial_limited ? "<div style='font-size:11px;color:#fbbf24;margin-top:4px;'>Upgrade after approval to grade all 100+ questions!</div>" : ""}
+        </div>
+      `;
+      data.breakdown.forEach((b) => {
+        const r = document.createElement("div");
+        r.className = "b-row";
+        r.innerHTML = `<span><b>Q${b.q}</b></span><span>Yours: <b>${b.yours}</b></span><span style="color:${b.ok ? "#4ade80" : "#f87171"};">${b.ok ? "✅ Correct" : `❌ Key: ${b.correct}`}</span>`;
+        grid.appendChild(r);
+      });
+    };
+
     ["searchInput", "gradeFilter", "streamFilter", "subjectFilter", "categoryFilter"].forEach((id) => {
       document.getElementById(id).addEventListener("input", applyFilters);
       document.getElementById(id).addEventListener("change", applyFilters);
     });
     document.getElementById("clearFiltersBtn").onclick = () => {
-      document.getElementById("searchInput").value = "";
-      document.getElementById("gradeFilter").value = "";
-      document.getElementById("streamFilter").value = "";
-      document.getElementById("subjectFilter").value = "";
-      document.getElementById("categoryFilter").value = "";
+      ["searchInput", "gradeFilter", "streamFilter", "subjectFilter", "categoryFilter"].forEach((id) => document.getElementById(id).value = "");
       applyFilters();
     };
-    document.getElementById("refreshBtn").onclick = async () => {
-      showToast("Refreshing library...");
-      await loadLibrary(true);
-      showToast("✅ Library refreshed!");
-    };
-    document.getElementById("loadMoreBtn").onclick = () => {
-      visibleLimit += 30;
+    document.getElementById("refreshBtn").onclick = async () => { await loadLibrary(true); showToast("✅ Refreshed!"); };
+    document.getElementById("loadMoreBtn").onclick = () => { visibleLimit += 30; renderCards(); };
+    document.getElementById("closeReaderBtn").onclick = async () => {
+      stopQuizTimer();
+      document.getElementById("readerModal").classList.add("hidden");
+      if (currentPdfDoc) try { await currentPdfDoc.destroy(); } catch {}
+      currentPdfDoc = null;
       renderCards();
     };
-
-    // Reader Controls
-    document.getElementById("closeReaderBtn").onclick = async () => {
-      document.getElementById("readerModal").classList.add("hidden");
-      if (currentPdfDoc) {
-        try { await currentPdfDoc.destroy(); } catch {}
-        currentPdfDoc = null;
-      }
-    };
-    document.getElementById("toggleAnswerBtn").onclick = async () => {
-      showingAnswer = !showingAnswer;
-      await loadActiveReaderDoc();
-    };
-    document.getElementById("prevPageBtn").onclick = () => {
-      if (currentPage > 1) { currentPage--; renderPage(currentPage); }
-    };
-    document.getElementById("nextPageBtn").onclick = () => {
-      if (currentPdfDoc && currentPage < currentPdfDoc.numPages) { currentPage++; renderPage(currentPage); }
-    };
+    document.getElementById("toggleAnswerBtn").onclick = async () => { showingAnswer = !showingAnswer; await loadActiveReaderDoc(); };
+    document.getElementById("toggleQuizBtn").onclick = () => readerMainDoc && startBubbleSheetMode(readerMainDoc.doc_id);
+    document.getElementById("prevPageBtn").onclick = () => { if (currentPage > 1) { currentPage--; renderPage(currentPage); } };
+    document.getElementById("nextPageBtn").onclick = () => { if (currentPdfDoc && currentPage < currentPdfDoc.numPages) { currentPage++; renderPage(currentPage); } };
     document.getElementById("pageInput").onchange = (e) => {
-      const val = parseInt(e.target.value, 10);
-      if (currentPdfDoc && val >= 1 && val <= currentPdfDoc.numPages) {
-        currentPage = val;
-        renderPage(currentPage);
-      }
+      const v = parseInt(e.target.value, 10);
+      if (currentPdfDoc && v >= 1 && v <= currentPdfDoc.numPages) { currentPage = v; renderPage(v); }
     };
-    document.getElementById("zoomInBtn").onclick = () => {
-      zoomMultiplier = Math.min(2.5, zoomMultiplier + 0.25);
-      document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`;
-      renderPage(currentPage);
-    };
-    document.getElementById("zoomOutBtn").onclick = () => {
-      zoomMultiplier = Math.max(0.6, zoomMultiplier - 0.25);
-      document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`;
-      renderPage(currentPage);
-    };
+    document.getElementById("zoomInBtn").onclick = () => { zoomMultiplier = Math.min(2.5, zoomMultiplier + 0.25); document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`; renderPage(currentPage); };
+    document.getElementById("zoomOutBtn").onclick = () => { zoomMultiplier = Math.max(0.6, zoomMultiplier - 0.25); document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`; renderPage(currentPage); };
     document.getElementById("readerSendChatBtn").onclick = () => {
       const activeDoc = showingAnswer && readerAnswerDoc ? readerAnswerDoc : readerMainDoc;
-      if (activeDoc) sendToChat(activeDoc, "pdf");
-    };
-    document.getElementById("readerSaveBtn").onclick = () => {
-      const activeDoc = showingAnswer && readerAnswerDoc ? readerAnswerDoc : readerMainDoc;
-      if (activeDoc) downloadDirect(activeDoc, "pdf");
-    };
-    document.getElementById("readerOriginalBtn").onclick = () => {
-      if (readerMainDoc) downloadDirect(readerMainDoc, "original");
+      if (activeDoc) sendOfflineTelegram(activeDoc);
     };
 
     initApp();
