@@ -350,4 +350,122 @@
           <h4 style="margin-bottom:6px;">Manage Trial Preview Books (Is_Trial)</h4>
           <p class="muted-p" style="margin-bottom:10px;">Search the library to mark which books remain accessible in Trial Mode.</p>
           <input id="admTrialSearch" class="q-input" placeholder="Search book title..." oninput="renderAdminTrialPicker()" />
-          <div id="admTrialList" class=
+          <div id="admTrialList" class="card-stack" style="margin-top:10px;"></div>
+        </div>
+      </div>
+    </section>
+
+    <nav id="bottomNav" class="bottom-nav"></nav>
+  </div>
+
+  <!-- Referral Modal -->
+  <div id="referralModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="ghost-btn" onclick="closeModal('referralModal')" data-i18n="back">Back</button>
+      <h3 data-i18n="ref_modal_title">Study Squad Referral</h3>
+    </div>
+    <div class="modal-body">
+      <div class="surface-card">
+        <div class="muted-p" data-i18n="your_ref_code">Your Personal Referral Code</div>
+        <div id="myRefCodeDisplay" class="ref-code-box">QELAL-...</div>
+        <p class="muted-p" style="margin-bottom:12px;">
+          <span data-i18n="ref_verified_lbl">Verified Friends Joined:</span>
+          <strong id="myRefCountDisplay" class="mono-num" style="color:var(--brass);">0</strong> / 2
+        </p>
+        <div class="actions">
+          <button id="shareRefTgBtn" class="brass-btn" style="margin-top:0;" data-i18n="btn_share_tg">Share on Telegram</button>
+          <button id="copyRefCodeBtn" class="dark-btn" data-i18n="btn_copy_code">Copy Code</button>
+        </div>
+      </div>
+      <div class="surface-card">
+        <h4 style="margin-bottom:6px;" data-i18n="ref_how_title">How Study Squad Perks Work</h4>
+        <p class="muted-p" data-i18n="ref_how_body">
+          Share your code with classmates in Bishoftu. Once two friends register and complete enrollment, you qualify for same-table Study Squad seating, a bound formula folder, and tuition savings.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Request Material Modal -->
+  <div id="requestModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="ghost-btn" onclick="closeModal('requestModal')" data-i18n="back">Back</button>
+      <h3 data-i18n="req_modal_title">Request a Material</h3>
+    </div>
+    <div class="modal-body">
+      <div class="surface-card">
+        <p class="muted-p" style="margin-bottom:12px;" data-i18n="req_desc">Looking for a specific past paper, textbook, or answer key? Send a note to the academic team.</p>
+        <input id="reqSubject" class="q-input" style="margin-bottom:10px;" placeholder="Subject (e.g. Grade 8 Science / Grade 12 Math)" />
+        <textarea id="reqDetails" class="q-input" rows="4" placeholder="Exam year, unit, or textbook title..."></textarea>
+        <button id="submitReqBtn" class="brass-btn" data-i18n="btn_send_req">Send Request</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Program Terms & Privacy Modal -->
+  <div id="termsModal" class="modal-full hidden">
+    <div class="modal-head">
+      <button class="ghost-btn" onclick="closeModal('termsModal')" data-i18n="back">Back</button>
+      <h3>Program Terms &amp; Privacy</h3>
+    </div>
+    <div class="modal-body">
+      <div class="surface-card prose-card">
+        <h4>1. Registration &amp; Membership Cycle</h4>
+        <p>Qelal Learning operates on a 30-day monthly tuition cycle starting from enrollment approval. Families receive reminders before renewal and a 7-day grace period after day 30 before returning to the 3-book preview tier.</p>
+        <h4>2. Protected Study Materials</h4>
+        <p>All textbooks, exam papers, answer keys, and study guides inside the hub are provided solely for personal academic preparation by registered Qelal students and parents. External redistribution or commercial resale is prohibited.</p>
+        <h4>3. Student &amp; Parent Data</h4>
+        <p>Names, phone numbers, grade levels, and study activity metrics are stored strictly for seat coordination, bi-weekly parent progress reporting, and exam preparation support. Contact us at +251 933 510 682 or +251 988 666 328 to update or remove your records.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Protected In-App PDF Reader + Bubble Sheet -->
+  <div id="readerModal" class="reader-modal hidden">
+    <div class="reader-header">
+      <button id="closeReaderBtn" class="r-btn" data-i18n="back">Back</button>
+      <div class="reader-title" id="readerTitle">Document</div>
+      <button id="toggleQuizBtn" class="r-btn quiz-toggle hidden">Bubble Sheet</button>
+      <button id="toggleAnswerBtn" class="r-btn answer-toggle hidden">Answer Key</button>
+    </div>
+    <div class="reader-toolbar">
+      <div class="page-controls">
+        <button id="prevPageBtn" class="r-btn">Prev</button>
+        <span class="mono-num"><input id="pageInput" class="page-input" type="number" min="1" value="1" /> / <span id="pageCount">?</span></span>
+        <button id="nextPageBtn" class="r-btn">Next</button>
+      </div>
+      <div class="page-controls">
+        <button id="zoomOutBtn" class="r-btn">−</button>
+        <span id="zoomLabel" class="mono-num">100%</span>
+        <button id="zoomInBtn" class="r-btn">+</button>
+      </div>
+    </div>
+
+    <div class="reader-canvas-wrap" id="canvasWrap">
+      <canvas id="pdfCanvas"></canvas>
+      <div id="readerLoading" class="reader-loading hidden">
+        <div class="mini-spinner"></div>
+        <span id="readerLoadText">Opening PDF...</span>
+      </div>
+    </div>
+
+    <div id="bubblePanel" class="bubble-panel hidden">
+      <div class="bubble-bar">
+        <span class="mono-num"><span id="bubbleAnsweredCount">0</span> / <span id="bubbleTotalCount">0</span> answered</span>
+        <span class="mono-num" id="quizTimerText">00:00</span>
+        <button id="submitQuizBtn" class="r-btn" style="background:var(--teal);">Submit &amp; Grade</button>
+      </div>
+      <div id="bubbleGrid" class="bubble-grid"></div>
+    </div>
+
+    <div class="reader-footer">
+      <button id="readerSendChatBtn" class="brass-btn" style="padding:9px;font-size:12px;" data-i18n="btn_offline_tg">
+        Save Offline in Telegram (Protected View)
+      </button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
