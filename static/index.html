@@ -4,28 +4,32 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Qelal Learning (ቀላል) — Study &amp; Exam Hub</title>
+  <link rel="icon" href="/favicon.ico" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Ethiopic:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body oncontextmenu="return false;">
 
-  <!-- 1. Branded Loading / Splash Screen -->
+  <!-- 1. Branded Loading Screen -->
   <div id="splashView" class="splash-screen">
-    <div class="splash-ring">
-      <div class="splash-emblem">ቀላል</div>
-    </div>
-    <h1 class="splash-brand">QELAL LEARNING</h1>
-    <p class="splash-sub" id="splashSub">Effortless Exam Prep • ቀላል የጥናት ማዕከል</p>
+    <div class="splash-mark">ቀላል</div>
+    <div class="splash-brand">QELAL LEARNING</div>
+    <p class="splash-sub">Bishoftu Study &amp; Exam Center · ቢሾፍቱ የጥናት ማዕከል</p>
     <div class="splash-loader"><div class="splash-bar"></div></div>
   </div>
 
-  <!-- 2. Outside-Telegram Fallback -->
+  <!-- 2. Outside Telegram Notice -->
   <div id="outsideView" class="gate-wrap hidden">
     <div class="gate-card">
-      <div class="gate-ico">📱</div>
-      <h2 id="outsideTitle">Open Inside Telegram</h2>
-      <p id="outsideMsg">Please open Qelal Learning from our Telegram bot to register and access your study hub.</p>
+      <div class="gate-icon-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      </div>
+      <h2 id="outsideTitle">Open inside Telegram</h2>
+      <p id="outsideMsg">Launch Qelal Learning from our Telegram bot to register and view your study materials.</p>
     </div>
   </div>
 
@@ -33,78 +37,82 @@
   <div id="onboardingView" class="onboard-wrap hidden">
     <div class="onboard-top">
       <div class="brand-mini">
-        <span class="brand-badge">ቀላል</span>
+        <span class="brand-seal">ቀ</span>
         <span>Qelal Learning</span>
       </div>
-      <button id="onboardLangBtn" class="lang-pill">EN / አማ</button>
+      <button id="onboardLangBtn" class="lang-btn">EN / አማ</button>
     </div>
 
     <!-- Step 0: Language Choice -->
     <div id="stepLang" class="wizard-card">
-      <div class="hero-tag">Bishoftu • Grades 1–12</div>
-      <h2>Choose Your Language<br /><span class="am-sub">ቋንቋ ይምረጡ</span></h2>
-      <p class="muted-p">Select your preferred language. You can switch anytime.<br />የሚፈልጉትን ቋንቋ ይምረጡ።</p>
+      <p class="eyebrow">Bishoftu · Grades 1–12</p>
+      <h2>Choose your language<br /><span class="am-sub">ቋንቋ ይምረጡ</span></h2>
+      <p class="muted-p">You can switch between English and Amharic anytime inside the app.</p>
       <div class="choice-stack">
         <button class="role-card" onclick="pickLanguage('en')">
-          <span class="role-ico">🇬🇧</span>
-          <div><strong>English</strong><small>Full Library, Quizzes &amp; Parent Portal</small></div>
+          <span class="role-code">EN</span>
+          <div><strong>English</strong><small>Study library, practice quizzes, and parent progress view</small></div>
         </button>
         <button class="role-card" onclick="pickLanguage('am')">
-          <span class="role-ico">🇪🇹</span>
-          <div><strong>አማርኛ (Amharic)</strong><small>ሙሉ መጽሐፍት፣ ፈተናዎች እና የወላጅ መከታተያ</small></div>
+          <span class="role-code">አማ</span>
+          <div><strong>አማርኛ (Amharic)</strong><small>መጽሐፍት፣ የፈተና ልምምድ እና የወላጅ መከታተያ</small></div>
         </button>
       </div>
     </div>
 
-    <!-- Step 1: Parent vs Student Role -->
+    <!-- Step 1: Role Choice -->
     <div id="stepRole" class="wizard-card hidden">
       <h2 data-i18n="who_title">Who is registering?</h2>
-      <p class="muted-p" data-i18n="who_sub">Choose your profile so we tailor your dashboard &amp; exam countdown.</p>
+      <p class="muted-p" data-i18n="who_sub">Select your role so we can configure your dashboard and exam countdown.</p>
       <div class="choice-stack">
         <button class="role-card" onclick="pickRole('student')">
-          <span class="role-ico">🎓</span>
+          <span class="role-svg">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
+          </span>
           <div>
-            <strong data-i18n="role_student">I am a Student</strong>
-            <small data-i18n="role_student_sub">Access books, bubble-sheet quizzes, study plans &amp; grade countdown</small>
+            <strong data-i18n="role_student">Student</strong>
+            <small data-i18n="role_student_sub">Study library, timed bubble-sheet quizzes, study plans, and grade countdown</small>
           </div>
         </button>
         <button class="role-card" onclick="pickRole('parent')">
-          <span class="role-ico">👨‍👩‍👧</span>
+          <span class="role-svg">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </span>
           <div>
-            <strong data-i18n="role_parent">I am a Parent / Guardian</strong>
-            <small data-i18n="role_parent_sub">Track child progress reports, link kids, get sibling discounts + full library</small>
+            <strong data-i18n="role_parent">Parent or Guardian</strong>
+            <small data-i18n="role_parent_sub">Child activity charts, progress reports, sibling discounts, and full library</small>
           </div>
         </button>
       </div>
       <div class="call-box">
-        <span data-i18n="prefer_call">Prefer phone registration? Call:</span>
-        <div><a href="tel:+251933510682">+251 933 510 682</a> • <a href="tel:+251988666328">+251 988 666 328</a></div>
+        <span data-i18n="prefer_call">Prefer to register by phone? Call us directly:</span>
+        <div><a href="tel:+251933510682">+251 933 510 682</a> · <a href="tel:+251988666328">+251 988 666 328</a></div>
       </div>
     </div>
 
-    <!-- Step 2: Registration Details Form -->
+    <!-- Step 2: Registration Form -->
     <div id="stepForm" class="wizard-card hidden">
       <div class="form-head">
-        <button class="ghost-btn" onclick="goStep('stepRole')" data-i18n="back">← Back</button>
-        <span id="formRoleTag" class="gold-chip">Student</span>
+        <button class="ghost-btn" onclick="goStep('stepRole')" data-i18n="back">Back</button>
+        <span id="formRoleTag" class="meta-label">Student</span>
       </div>
 
       <label class="field-lbl" id="lblFullName" data-i18n="lbl_student_name">Student Full Name</label>
-      <input id="regName" class="q-input" type="text" placeholder="e.g. Abebe Kebede" />
+      <input id="regName" class="q-input" type="text" placeholder="Abebe Kebede" />
 
       <label class="field-lbl" data-i18n="lbl_phone">Active Phone Number</label>
       <input id="regPhone" class="q-input" type="tel" placeholder="+251 9..." />
 
-      <!-- Single Student Grade Picker -->
+      <!-- Student Grade Grid -->
       <div id="studentSingleFields">
-        <label class="field-lbl" data-i18n="lbl_grade">Select Grade (🎯 = National Exam)</label>
+        <label class="field-lbl" data-i18n="lbl_grade">Grade Level (National exam grades marked)</label>
         <div id="studentGradeGrid" class="grade-grid"></div>
 
         <div id="studentStreamWrap" class="hidden">
-          <label class="field-lbl" data-i18n="lbl_stream">Select Stream (Grades 11–12)</label>
+          <label class="field-lbl" data-i18n="lbl_stream">Academic Stream (Grades 11–12)</label>
           <div class="stream-row">
-            <button type="button" class="stream-btn active" data-stream="Natural" onclick="setStudentStream('Natural')" data-i18n="stream_nat">🔬 Natural Science</button>
-            <button type="button" class="stream-btn" data-stream="Social" onclick="setStudentStream('Social')" data-i18n="stream_soc">🌍 Social Science</button>
+            <button type="button" class="stream-btn active" data-stream="Natural" onclick="setStudentStream('Natural')" data-i18n="stream_nat">Natural Science</button>
+            <button type="button" class="stream-btn" data-stream="Social" onclick="setStudentStream('Social')" data-i18n="stream_soc">Social Science</button>
           </div>
         </div>
       </div>
@@ -112,11 +120,11 @@
       <!-- Parent Multi-Child Builder -->
       <div id="parentChildrenFields" class="hidden">
         <div class="section-row">
-          <label class="field-lbl" style="margin:0;" data-i18n="lbl_children">Your Children</label>
-          <button type="button" id="addChildBtn" class="add-child-btn" data-i18n="add_child">+ Add Another Child</button>
+          <label class="field-lbl" style="margin:0;" data-i18n="lbl_children">Children</label>
+          <button type="button" id="addChildBtn" class="add-child-btn" data-i18n="add_child">+ Add Child</button>
         </div>
         <div id="siblingBanner" class="sibling-banner hidden" data-i18n="sibling_msg">
-          🎉 Sibling Discount Unlocked! Registering 2+ children qualifies for tuition discounts on all children!
+          Sibling tuition discount applied for registering 2 or more children.
         </div>
         <div id="childrenList"></div>
       </div>
@@ -129,53 +137,66 @@
       </select>
 
       <label class="field-lbl" data-i18n="lbl_ref">Referral Code (Optional)</label>
-      <input id="regRefCode" class="q-input" type="text" placeholder="e.g. QELAL-1A2B3" />
+      <input id="regRefCode" class="q-input" type="text" placeholder="QELAL-1A2B3" />
 
-      <button id="submitRegBtn" class="gold-btn" data-i18n="btn_submit_reg">Complete Registration &amp; Enter Hub</button>
+      <p class="terms-note">
+        <span data-i18n="terms_agree">By submitting, you agree to our</span>
+        <button type="button" class="link-btn" onclick="openTermsModal()" data-i18n="terms_link">Program Terms &amp; Privacy</button>.
+      </p>
+
+      <button id="submitRegBtn" class="brass-btn" data-i18n="btn_submit_reg">Submit Registration</button>
     </div>
   </div>
 
   <!-- 4. Main Authenticated App Shell -->
   <div id="appShell" class="app-shell hidden">
-    <!-- Top Header -->
     <header class="app-header">
       <div class="header-left">
-        <span class="brand-badge sm">ቀላል</span>
-        <div>
-          <div class="hdr-name" id="hdrGreeting">Hi!</div>
+        <span class="brand-seal sm">ቀ</span>
+        <div style="min-width:0;">
+          <div class="hdr-name" id="hdrGreeting">Account</div>
           <div class="hdr-meta" id="hdrMeta">Grade 12</div>
         </div>
       </div>
       <div class="header-right">
-        <button id="appLangBtn" class="lang-pill">EN | አማ</button>
-        <button id="hdrInviteBtn" class="gold-pill">🎁 <span id="hdrRefCount">0</span></button>
+        <button id="appLangBtn" class="lang-btn">EN | አማ</button>
+        <button id="hdrInviteBtn" class="hdr-ref-btn">
+          <span data-i18n="invite_short">Invite</span>
+          <span class="mono-num" id="hdrRefCount">0</span>
+        </button>
       </div>
     </header>
 
-    <!-- Tab 1: Parent Home Dashboard -->
+    <!-- Tab: Parent Visual Activity & Progress Home -->
     <section id="tabParentHome" class="tab-view hidden">
-      <div class="status-card" id="parentStatusCard"></div>
+      <div class="surface-card" id="parentStatusCard"></div>
 
       <div class="block-head">
-        <h3 data-i18n="my_children">👨‍👩‍👧 Registered Children</h3>
+        <h3 data-i18n="child_activity_title">Child Study Activity</h3>
       </div>
-      <div id="parentChildrenList"></div>
+      <div id="parentChildTabs" class="seg-tabs hidden"></div>
+      <div id="parentVisualDash"></div>
 
       <div class="block-head" style="margin-top:16px;">
-        <h3 data-i18n="progress_reports">📊 Bi-Weekly Progress Reports</h3>
+        <h3 data-i18n="progress_reports">Bi-Weekly Coordinator Reports</h3>
       </div>
       <div id="parentReportsList"></div>
     </section>
 
-    <!-- Tab 2: Study Library -->
+    <!-- Tab: Study Library -->
     <section id="tabLibrary" class="tab-view hidden">
       <div id="countdownBanner" class="countdown-card hidden"></div>
       <div id="modeBanner" class="mode-strip hidden"></div>
 
-      <!-- Prominent Quiz Me CTA right above Search -->
       <button id="topQuizCta" class="quiz-cta-bar">
-        <span>🎯 <strong data-i18n="quiz_cta_title">Quiz Me — Interactive Bubble Sheet</strong></span>
-        <span class="cta-arrow" data-i18n="quiz_cta_go">Start →</span>
+        <div class="quiz-cta-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
+          <div>
+            <strong data-i18n="quiz_cta_title">Practice Bubble-Sheet Quizzes</strong>
+            <small id="quizCtaSub">Timed past papers with automatic grading</small>
+          </div>
+        </div>
+        <span class="cta-action" data-i18n="quiz_cta_go">Open</span>
       </button>
 
       <div class="search-box-wrap">
@@ -187,10 +208,10 @@
           <select id="categoryFilter" class="q-select"></select>
         </div>
         <div class="count-row">
-          <span id="resultCount">0 items</span>
+          <span id="resultCount" class="mono-num">0 items</span>
           <div>
-            <button id="refreshBtn" class="link-btn hidden" style="margin-right:10px;">🔄 Refresh</button>
-            <button id="clearFiltersBtn" class="link-btn" data-i18n="show_all">Show All</button>
+            <button id="refreshBtn" class="link-btn hidden" style="margin-right:12px;">Refresh</button>
+            <button id="clearFiltersBtn" class="link-btn" data-i18n="show_all">Show All Grades</button>
           </div>
         </div>
       </div>
@@ -199,131 +220,134 @@
       <button id="loadMoreBtn" class="load-more hidden">Show More</button>
     </section>
 
-    <!-- Tab 3: Quiz Hub -->
+    <!-- Tab: Quiz Hub -->
     <section id="tabQuiz" class="tab-view hidden">
       <div class="section-intro">
-        <h3 data-i18n="quiz_hub_title">🎯 Mock Exams &amp; Auto-Grading</h3>
+        <h3 data-i18n="quiz_hub_title">Mock Exams &amp; Bubble Sheets</h3>
         <p id="quizHubHint" class="muted-p"></p>
       </div>
       <div id="quizHubList" class="card-stack"></div>
     </section>
 
-    <!-- Tab 4: Study Plans -->
+    <!-- Tab: Study Plans -->
     <section id="tabPlan" class="tab-view hidden">
       <div class="section-intro">
-        <h3 data-i18n="plan_title">📅 Interactive Study Plans</h3>
-        <p class="muted-p" data-i18n="plan_sub">Track your daily chapters or build your own checklist.</p>
+        <h3 data-i18n="plan_title">Study Plans &amp; Syllabi</h3>
+        <p class="muted-p" data-i18n="plan_sub">Follow a structured schedule or add your own daily tasks.</p>
       </div>
       <div id="studyPlanBody"></div>
     </section>
 
-    <!-- Tab 5: Saved, Referral & Request -->
+    <!-- Tab: Saved, Referral, Request & Legal -->
     <section id="tabMore" class="tab-view hidden">
-      <div class="more-actions">
-        <button class="more-tile" onclick="openReferralModal()">
-          <span>🎁</span><strong data-i18n="tile_ref">Referral Program</strong>
+      <div class="ledger-menu">
+        <button class="ledger-row" onclick="openReferralModal()">
+          <span><strong data-i18n="tile_ref">Study Squad Referral</strong><small data-i18n="tile_ref_sub">Share your code and track verified friends</small></span>
+          <span class="chev">›</span>
         </button>
-        <button class="more-tile" onclick="openRequestModal()">
-          <span>📩</span><strong data-i18n="tile_req">Request Material</strong>
+        <button class="ledger-row" onclick="openRequestModal()">
+          <span><strong data-i18n="tile_req">Request Missing Material</strong><small data-i18n="tile_req_sub">Ask for a specific past paper or textbook</small></span>
+          <span class="chev">›</span>
+        </button>
+        <button class="ledger-row" onclick="openTermsModal()">
+          <span><strong data-i18n="terms_link">Program Terms &amp; Privacy</strong><small>30-day cycle, grace window, and reading policy</small></span>
+          <span class="chev">›</span>
         </button>
       </div>
       <div id="savedBody"></div>
     </section>
 
-    <!-- Bottom Navigation Dock -->
-    <nav id="bottomNav" class="bottom-nav"></nav>
-  </div>
+    <!-- Tab: Admin Console (Visible Only to Admin) -->
+    <section id="tabAdmin" class="tab-view hidden">
+      <div class="section-intro">
+        <h3>Admin Console</h3>
+        <p class="muted-p">Manage student approvals, billing cycles, progress reports, and trial access.</p>
+      </div>
+      <div id="adminSummaryGrid" class="kpi-grid"></div>
 
-  <!-- Referral Modal -->
-  <div id="referralModal" class="modal-full hidden">
-    <div class="modal-head">
-      <button class="ghost-btn" onclick="closeModal('referralModal')" data-i18n="back">← Back</button>
-      <h3 data-i18n="ref_modal_title">🎁 Study Squad Referral</h3>
-    </div>
-    <div class="modal-body">
-      <div class="surface-card">
-        <div class="muted-p" data-i18n="your_ref_code">Your Personal Referral Code</div>
-        <div id="myRefCodeDisplay" class="ref-code-box">QELAL-...</div>
-        <p class="muted-p" style="margin-bottom:12px;">
-          <span data-i18n="ref_verified_lbl">Verified Friends Joined:</span>
-          <strong id="myRefCountDisplay" style="color:var(--gold);">0</strong> / 2
-        </p>
-        <div class="actions">
-          <button id="shareRefTgBtn" class="gold-btn" data-i18n="btn_share_tg">🚀 Share on Telegram</button>
-          <button id="copyRefCodeBtn" class="dark-btn" data-i18n="btn_copy_code">📋 Copy Code</button>
+      <div class="seg-tabs" id="adminSubTabs">
+        <button class="seg-btn active" onclick="switchAdminSubTab('admStudents', this)">Accounts</button>
+        <button class="seg-btn" onclick="switchAdminSubTab('admReports', this)">Publish Report</button>
+        <button class="seg-btn" onclick="switchAdminSubTab('admBroadcast', this)">Broadcast</button>
+        <button class="seg-btn" onclick="switchAdminSubTab('admConfig', this)">Settings &amp; Trial</button>
+      </div>
+
+      <!-- Admin Sub 1: Students & Billing -->
+      <div id="admStudents" class="admin-sub">
+        <div class="filters-grid" style="margin-bottom:10px;">
+          <select id="admStatusFilter" class="q-select" onchange="renderAdminStudents()">
+            <option value="">All Statuses</option>
+            <option value="NEW">Pending (NEW)</option>
+            <option value="EXPIRED">Grace (EXPIRED)</option>
+            <option value="APPROVED">Active (APPROVED)</option>
+            <option value="LEFT">Inactive (LEFT)</option>
+          </select>
+          <input id="admSearchInput" class="q-input" style="padding:7px 10px;font-size:12px;" placeholder="Filter name or phone..." oninput="renderAdminStudents()" />
+        </div>
+        <div id="adminStudentList" class="card-stack"></div>
+      </div>
+
+      <!-- Admin Sub 2: Publish Bi-Weekly Progress Report -->
+      <div id="admReports" class="admin-sub hidden">
+        <div class="surface-card">
+          <label class="field-lbl" style="margin-top:0;">Student</label>
+          <select id="admRptStudent" class="q-input"></select>
+          <label class="field-lbl">Period</label>
+          <input id="admRptPeriod" class="q-input" placeholder="e.g. Nov 10 – Nov 24" />
+          <label class="field-lbl">Attendance</label>
+          <input id="admRptAttendance" class="q-input" placeholder="e.g. 4 / 4 Weekend Sessions" />
+          <label class="field-lbl">Quiz &amp; Class Scores</label>
+          <input id="admRptScores" class="q-input" placeholder="e.g. Math 86%, Physics 79%" />
+          <label class="field-lbl">What Improved</label>
+          <textarea id="admRptImproved" class="q-input" rows="2" placeholder="Mastered derivatives and word problems..."></textarea>
+          <label class="field-lbl">Next Focus</label>
+          <textarea id="admRptFocus" class="q-input" rows="2" placeholder="Organic chemistry unit 3 + 20 daily questions..."></textarea>
+          <button id="admPublishRptBtn" class="brass-btn" onclick="adminPublishReport()">Publish Report to Parent</button>
         </div>
       </div>
-      <div class="surface-card">
-        <h4 style="margin-bottom:6px;" data-i18n="ref_how_title">Study Squad Perks</h4>
-        <p class="muted-p" data-i18n="ref_how_body">
-          Share your code with friends in Bishoftu. When 2 friends register and get approved, you unlock Study Squad same-table seating, a bound formula folder, and tuition savings!
-        </p>
-      </div>
-    </div>
-  </div>
 
-  <!-- Request Material Modal -->
-  <div id="requestModal" class="modal-full hidden">
-    <div class="modal-head">
-      <button class="ghost-btn" onclick="closeModal('requestModal')" data-i18n="back">← Back</button>
-      <h3 data-i18n="req_modal_title">📩 Request a Material</h3>
-    </div>
-    <div class="modal-body">
-      <div class="surface-card">
-        <p class="muted-p" style="margin-bottom:12px;" data-i18n="req_desc">Need a specific past exam, textbook, or answer key? Notify our team directly.</p>
-        <input id="reqSubject" class="q-input" placeholder="Subject (e.g. Grade 8 Science / Grade 12 Math)" />
-        <textarea id="reqDetails" class="q-input" rows="4" placeholder="Describe the exam year, unit, or textbook..."></textarea>
-        <button id="submitReqBtn" class="gold-btn" data-i18n="btn_send_req">Send Request to Admin</button>
+      <!-- Admin Sub 3: Targeted Broadcast -->
+      <div id="admBroadcast" class="admin-sub hidden">
+        <div class="surface-card">
+          <label class="field-lbl" style="margin-top:0;">Target Audience</label>
+          <select id="admBcTarget" class="q-input">
+            <option value="all">All Registered Accounts</option>
+            <option value="parents">All Parents</option>
+            <option value="approved">Active / Approved Members</option>
+            <option value="new">Pending (NEW) Accounts</option>
+            <option value="grade_12">Grade 12 Students</option>
+            <option value="grade_8">Grade 8 Students</option>
+            <option value="grade_6">Grade 6 Students</option>
+            <option value="natural">Natural Science Stream</option>
+            <option value="social">Social Science Stream</option>
+          </select>
+          <label class="field-lbl">Message</label>
+          <textarea id="admBcMessage" class="q-input" rows="4" placeholder="Write announcement text..."></textarea>
+          <button id="admSendBcBtn" class="brass-btn" onclick="adminSendBroadcast()">Send Announcement</button>
+        </div>
       </div>
-    </div>
-  </div>
 
-  <!-- Protected In-App PDF Reader + Integrated Bubble Sheet -->
-  <div id="readerModal" class="reader-modal hidden">
-    <div class="reader-header">
-      <button id="closeReaderBtn" class="r-btn" data-i18n="back">← Back</button>
-      <div class="reader-title" id="readerTitle">Document</div>
-      <button id="toggleQuizBtn" class="r-btn quiz-toggle hidden">🎯 Quiz</button>
-      <button id="toggleAnswerBtn" class="r-btn answer-toggle hidden">🔑 Key</button>
-    </div>
-    <div class="reader-toolbar">
-      <div class="page-controls">
-        <button id="prevPageBtn" class="r-btn">◀</button>
-        <span><input id="pageInput" class="page-input" type="number" min="1" value="1" /> / <span id="pageCount">?</span></span>
-        <button id="nextPageBtn" class="r-btn">▶</button>
-      </div>
-      <div class="page-controls">
-        <button id="zoomOutBtn" class="r-btn">－</button>
-        <span id="zoomLabel">100%</span>
-        <button id="zoomInBtn" class="r-btn">＋</button>
-      </div>
-    </div>
+      <!-- Admin Sub 4: Launch Mode, Dates & Trial Picker -->
+      <div id="admConfig" class="admin-sub hidden">
+        <div class="surface-card">
+          <label class="field-lbl" style="margin-top:0;">Access Mode</label>
+          <select id="admLaunchMode" class="q-input">
+            <option value="OPEN_LAUNCH">OPEN_LAUNCH (Free for all registered users)</option>
+            <option value="PAID_GATED">PAID_GATED (3-book Trial for Pending/Left)</option>
+          </select>
+          <label class="field-lbl">Grade 12 ESSLCE Date</label>
+          <input id="admDateMatric" class="q-input" type="date" />
+          <label class="field-lbl">Grade 8 Ministry Date</label>
+          <input id="admDateG8" class="q-input" type="date" />
+          <label class="field-lbl">Grade 6 Ministry Date</label>
+          <input id="admDateG6" class="q-input" type="date" />
+          <label class="field-lbl">Semester Final Exam Date</label>
+          <input id="admDateSem" class="q-input" type="date" />
+          <button id="admSaveCfgBtn" class="brass-btn" onclick="adminSaveConfig()">Save Configuration</button>
+        </div>
 
-    <div class="reader-canvas-wrap" id="canvasWrap">
-      <canvas id="pdfCanvas"></canvas>
-      <div id="readerLoading" class="reader-loading hidden">
-        <div class="mini-spinner"></div>
-        <span id="readerLoadText">Opening PDF...</span>
-      </div>
-    </div>
-
-    <div id="bubblePanel" class="bubble-panel hidden">
-      <div class="bubble-bar">
-        <span>📝 <span id="bubbleAnsweredCount">0</span>/<span id="bubbleTotalCount">0</span></span>
-        <span>⏱ <span id="quizTimerText">00:00</span></span>
-        <button id="submitQuizBtn" class="r-btn" style="background:#16a34a;">Submit &amp; Grade</button>
-      </div>
-      <div id="bubbleGrid" class="bubble-grid"></div>
-    </div>
-
-    <div class="reader-footer">
-      <button id="readerSendChatBtn" class="gold-btn" style="padding:9px;font-size:12px;" data-i18n="btn_offline_tg">
-        🔒 Save for Offline Reading (Inside Telegram Only)
-      </button>
-    </div>
-  </div>
-
-  <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js"></script>
-</body>
-</html>
+        <div class="surface-card">
+          <h4 style="margin-bottom:6px;">Manage Trial Preview Books (Is_Trial)</h4>
+          <p class="muted-p" style="margin-bottom:10px;">Search the library to mark which books remain accessible in Trial Mode.</p>
+          <input id="admTrialSearch" class="q-input" placeholder="Search book title..." oninput="renderAdminTrialPicker()" />
+          <div id="admTrialList" class=
