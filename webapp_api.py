@@ -1,4 +1,5 @@
 import os
+import re
 import hmac
 import json
 import time
@@ -8,7 +9,7 @@ import tempfile
 import asyncio
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import parse_qsl, quote
 
 import httpx
@@ -16,9 +17,10 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from study_plans import STUDY_PLAN_TEMPLATES
+from receipt_generator import generate_membership_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ def create_webapp_router(
     eat_tz,
 ):
     router = APIRouter()
-    session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v4").encode()).digest()
+    session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v5").encode()).digest()
 
     state = {
         "creds": None,
@@ -135,6 +137,7 @@ def create_webapp_router(
         rpt_rows = reports_sheet.get_all_values()[1:]
 
         by_tg = {}
+        all_regs = []
         for idx, row in enumerate(reg_rows, start=2):
             r = row + [""] * (18 - len(row))
             if r[6].strip():
@@ -145,12 +148,18 @@ def create_webapp_router(
                         reg_sheet.update_cell(idx, 13, ref_code)
                     except Exception:
                         pass
-                by_tg[r[6].strip()] = {
+                rec = {
+                    "row_idx": idx,
+                    "id": r[0],
                     "name": r[1] or "Student",
                     "grade": r[2],
                     "phone": r[3],
                     "status": r[4].strip().upper() or "NEW",
+                    "timestamp": r[5],
+                    "tg_id": r[6].strip(),
+                    "approved_at": r[7],
                     "expires_on": r[8],
+                    "months_paid": int(r[9]) if r[9].isdigit() else 0,
                     "stream": r[11] or "General",
                     "referral_code": ref_code,
                     "referred_by": r[13],
@@ -159,10 +168,13 @@ def create_webapp_router(
                     "format": r[16] or "Weekend Hub",
                     "lang": r[17] or "en",
                 }
+                by_tg[r[6].strip()] = rec
+                all_regs.append(rec)
 
         children_by_parent = {}
         child_by_tg = {}
         student_by_id = {}
+        all_students = []
         for row in stu_rows:
             s = row + [""] * (11 - len(row))
             if not s[0]:
@@ -180,6 +192,7 @@ def create_webapp_router(
                 "sibling_discount": s[9] == "YES",
             }
             student_by_id[s[0]] = stu_obj
+            all_students.append(stu_obj)
             if s[5].strip():
                 children_by_parent.setdefault(s[5].strip(), []).append(stu_obj)
             if s[6].strip():
@@ -205,8 +218,11 @@ def create_webapp_router(
 
         return {
             "by_tg": by_tg,
+            "all_regs": all_regs,
+            "all_students": all_students,
             "children_by_parent": children_by_parent,
             "child_by_tg": child_by_tg,
+            "student_by_id": student_by_id,
             "reports_by_stu": approved_reports_by_stu,
         }
 
@@ -399,6 +415,12 @@ def create_webapp_router(
             raise HTTPException(status_code=403, detail="Not registered")
         return tg_id, access
 
+    async def require_admin(request: Request) -> tuple[int, dict]:
+        tg_id, access = await require_session(request)
+        if not access.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return tg_id, access
+
     def _flush_analytics_sync(rows: list[list[str]]):
         _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
         analytics_sheet.append_rows(rows, value_input_option="USER_ENTERED")
@@ -409,7 +431,7 @@ def create_webapp_router(
             ts, str(tg_id), access.get("name", ""), access.get("grade", ""),
             action, doc_id, file_name, subject, score,
         ])
-        if len(state["analytics_buffer"]) >= 10 or (time.time() - state["last_flush_ts"] > 45):
+        if action == "QUIZ_SUBMIT" or len(state["analytics_buffer"]) >= 10 or (time.time() - state["last_flush_ts"] > 45):
             batch = state["analytics_buffer"][:]
             state["analytics_buffer"].clear()
             state["last_flush_ts"] = time.time()
@@ -439,8 +461,13 @@ def create_webapp_router(
         raise HTTPException(status_code=404, detail="Source missing")
 
     # ==========================================================================
-    # ROUTES
+    # PUBLIC / STUDENT / PARENT ROUTES
     # ==========================================================================
+    @router.get("/favicon.ico")
+    async def favicon():
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#101318"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#D49B35" font-size="34" font-weight="bold" font-family="sans-serif">ቀ</text></svg>'
+        return Response(content=svg, media_type="image/svg+xml")
+
     @router.get("/webapp", response_class=HTMLResponse)
     async def serve_webapp():
         html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
@@ -468,11 +495,7 @@ def create_webapp_router(
             tg_id = int(user["id"])
             access = await get_user_access(tg_id)
             if not access["registered"] and not access["is_admin"]:
-                return {
-                    "ok": False,
-                    "status": "NOT_REGISTERED",
-                    "tg_first_name": user.get("first_name", ""),
-                }
+                return {"ok": False, "status": "NOT_REGISTERED", "tg_first_name": user.get("first_name", "")}
 
             cfg = await get_config()
             token = create_session_token(tg_id)
@@ -612,23 +635,23 @@ def create_webapp_router(
                 if ch["stream"] != "General":
                     c_txt += f" ({ch['stream']})"
                 if ch["child_contact"]:
-                    c_txt += f"\n  📲 Child TG/Contact: <code>{html.escape(ch['child_contact'])}</code>"
+                    c_txt += f"\n  Child Contact: <code>{html.escape(ch['child_contact'])}</code>"
                 if inv:
-                    c_txt += f"\n  🔗 Child Invite Link: {inv}"
+                    c_txt += f"\n  Invite Link: {inv}"
                 child_lines.append(c_txt)
 
             admin_msg = (
-                f"🚨 <b>NEW {role.upper()} REGISTRATION (Mini App)</b>\n\n"
-                f"👤 <b>Name:</b> {html.escape(full_name)}\n"
-                f"📞 <b>Phone:</b> <code>{html.escape(phone)}</code>\n"
-                f"🆔 <code>{tg_id}</code> | 🔑 Code: <code>{my_ref_code}</code>\n"
-                f"{'🎉 <b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)!</b>\n' if sibling_disc else ''}"
-                f"{f'🤝 <b>Referred by:</b> {html.escape(ref_name)} (<code>{valid_ref}</code>)\n' if valid_ref else ''}\n"
+                f"<b>NEW {role.upper()} REGISTRATION</b>\n\n"
+                f"<b>Name:</b> {html.escape(full_name)}\n"
+                f"<b>Phone:</b> <code>{html.escape(phone)}</code>\n"
+                f"<b>TG ID:</b> <code>{tg_id}</code> | <b>Code:</b> <code>{my_ref_code}</code>\n"
+                f"{'<b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)</b>\n' if sibling_disc else ''}"
+                f"{f'<b>Referred by:</b> {html.escape(ref_name)} (<code>{valid_ref}</code>)\n' if valid_ref else ''}\n"
                 f"<b>Students:</b>\n" + "\n".join(child_lines)
             )
             kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_user:{tg_id}"),
+                InlineKeyboardButton("Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
+                InlineKeyboardButton("Reject", callback_data=f"reject_user:{tg_id}"),
             ]])
             try:
                 await get_ptb_app().bot.send_message(chat_id=admin_user_id, text=admin_msg, reply_markup=kb, parse_mode="HTML")
@@ -692,6 +715,7 @@ def create_webapp_router(
                 "has_quiz": it["has_quiz"],
                 "quiz_total_q": it["quiz_total_q"],
                 "locked": not is_unlocked,
+                "is_trial": it["is_trial"],
                 "is_trial_pick": it["doc_id"] in trial_ids,
             })
         return {"ok": True, "tier": access["tier"], "launch_mode": access["launch_mode"], "items": public_items}
@@ -768,9 +792,9 @@ def create_webapp_router(
 
         bot = get_ptb_app().bot
         caption = (
-            f"📚 <b>{html.escape(item['file_name'])}</b>\n"
-            f"🏷 {item['grade']} | {item['subject']} | {item['category']}\n"
-            f"🔒 <i>Viewable offline inside Telegram only (forwarding &amp; local saving disabled).</i>"
+            f"<b>{html.escape(item['file_name'])}</b>\n"
+            f"{item['grade']} · {item['subject']} · {item['category']}\n"
+            f"<i>Protected for offline reading inside Telegram only (forwarding and local saving disabled).</i>"
         )
 
         if item["telegram_file_id"]:
@@ -782,7 +806,7 @@ def create_webapp_router(
             return {"ok": True, "cached": True}
 
         if item["file_size_mb"] > 48:
-            return {"ok": False, "too_large": True, "message": "This large book (>48 MB) can be read directly inside the Mini App reader!"}
+            return {"ok": False, "too_large": True, "message": "This book exceeds Telegram's 48 MB bot send limit. Read it directly in the in-app viewer."}
 
         url, auth_headers, fname, _ = await get_upstream_source(item)
         tmp_path = None
@@ -939,14 +963,487 @@ def create_webapp_router(
         await get_ptb_app().bot.send_message(
             chat_id=admin_user_id,
             text=(
-                f"📩 <b>MATERIAL REQUEST FROM {access.get('role','student').upper()}</b>\n\n"
-                f"👤 <b>Name:</b> {html.escape(access.get('name', 'Student'))} ({html.escape(access.get('grade', ''))})\n"
-                f"📞 <code>{html.escape(access.get('phone', ''))}</code> | 🆔 <code>{tg_id}</code>\n"
-                f"📚 <b>Subject:</b> {html.escape(subject or 'General')}\n"
-                f"📝 <b>Request:</b> {html.escape(details)}"
+                f"<b>MATERIAL REQUEST ({access.get('role','student').upper()})</b>\n\n"
+                f"<b>Name:</b> {html.escape(access.get('name', 'Student'))} ({html.escape(access.get('grade', ''))})\n"
+                f"<b>Phone:</b> <code>{html.escape(access.get('phone', ''))}</code> | <b>TG ID:</b> <code>{tg_id}</code>\n"
+                f"<b>Subject:</b> {html.escape(subject or 'General')}\n"
+                f"<b>Request:</b> {html.escape(details)}"
             ),
             parse_mode="HTML",
         )
         return {"ok": True}
+
+    # --- LIVE PARENT VISUAL ANALYTICS ---
+    @router.get("/api/parent/analytics")
+    async def api_parent_analytics(request: Request):
+        tg_id, access = await require_session(request)
+        bundle = await get_reg_bundle()
+        _, by_id, _ = await get_library_and_keys()
+
+        children = bundle["children_by_parent"].get(str(tg_id), [])
+        if not children and access.get("role") != "parent":
+            return {"ok": True, "children_analytics": []}
+
+        def _load_raw():
+            _, _, _, analytics_sheet, _, prog_sheet, _, _ = get_all_worksheets_fn()
+            return analytics_sheet.get_all_values()[1:], prog_sheet.get_all_values()[1:]
+
+        ana_sheet_rows, prog_rows = await asyncio.to_thread(_load_raw)
+        all_ana_rows = ana_sheet_rows + list(state["analytics_buffer"])
+
+        prog_by_tg = {}
+        for pr in prog_rows:
+            p = pr + [""] * (6 - len(pr))
+            if p[0].strip():
+                try:
+                    prog_by_tg[p[0].strip()] = {
+                        "bookmarks": json.loads(p[1]) if p[1] else [],
+                        "last_read": json.loads(p[2]) if p[2] else {},
+                        "plan_progress": json.loads(p[3]) if p[3] else {},
+                        "custom_plan": json.loads(p[4]) if p[4] else [],
+                    }
+                except Exception:
+                    pass
+
+        today = datetime.now(eat_tz).date()
+        last_7_days = [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+        bot_user = get_bot_username()
+
+        results = []
+        for ch in children:
+            target_tg = ch["child_tg_id"] or (str(tg_id) if len(children) == 1 else "")
+            is_shared_phone = not bool(ch["child_tg_id"])
+            inv_url = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
+
+            child_events = [r for r in all_ana_rows if len(r) >= 8 and target_tg and str(r[1]).strip() == target_tg]
+            child_prog = prog_by_tg.get(target_tg, {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []})
+
+            unique_docs_viewed, total_views, offline_saved = set(), 0, 0
+            quiz_trend, subj_map = [], {}
+            daily_counts = {d: 0 for d in last_7_days}
+
+            for ev in child_events:
+                e = ev + [""] * (9 - len(ev))
+                ts_str, _, _, _, action, doc_id, fname, subject, score_str = e[:9]
+                day_str = ts_str[:10]
+                if day_str in daily_counts:
+                    daily_counts[day_str] += 1
+
+                subj = subject or "General"
+                subj_map.setdefault(subj, {"subject": subj, "views": 0, "quizzes": 0, "pct_sum": 0.0})
+
+                if action == "VIEW":
+                    total_views += 1
+                    unique_docs_viewed.add(doc_id)
+                    subj_map[subj]["views"] += 1
+                elif action == "SEND_CHAT":
+                    offline_saved += 1
+                elif action == "QUIZ_SUBMIT":
+                    m_pct = re.search(r"\((\d+(?:\.\d+)?)%\)", score_str)
+                    pct = float(m_pct.group(1)) if m_pct else 0.0
+                    quiz_trend.append({
+                        "date": ts_str,
+                        "label": fname[:26],
+                        "subject": subj,
+                        "score_text": score_str,
+                        "pct": pct,
+                    })
+                    subj_map[subj]["quizzes"] += 1
+                    subj_map[subj]["pct_sum"] += pct
+
+            avg_quiz_pct = round(sum(q["pct"] for q in quiz_trend) / len(quiz_trend), 1) if quiz_trend else None
+            quiz_delta_pct = round(quiz_trend[-1]["pct"] - quiz_trend[0]["pct"], 1) if len(quiz_trend) >= 2 else None
+
+            subject_stats = [
+                {
+                    "subject": s["subject"],
+                    "views": s["views"],
+                    "quizzes": s["quizzes"],
+                    "avg_pct": round(s["pct_sum"] / s["quizzes"], 1) if s["quizzes"] else None,
+                }
+                for s in subj_map.values()
+            ]
+            subject_stats.sort(key=lambda x: (x["views"] + x["quizzes"] * 2), reverse=True)
+
+            plan_prog = child_prog.get("plan_progress", {})
+            custom_plan = child_prog.get("custom_plan", [])
+            plan_done, plan_total = 0, 0
+            for tpl in STUDY_PLAN_TEMPLATES:
+                tpl_done = sum(1 for tk in tpl["tasks"] if plan_prog.get(tk["id"]))
+                if tpl_done > 0:
+                    plan_done += tpl_done
+                    plan_total += len(tpl["tasks"])
+            if custom_plan:
+                plan_done += sum(1 for t in custom_plan if t.get("done"))
+                plan_total += len(custom_plan)
+            if plan_total == 0:
+                plan_total = 20
+            plan_pct = round((plan_done / plan_total) * 100)
+
+            recent_reads = []
+            for did, info in sorted(child_prog.get("last_read", {}).items(), key=lambda x: x[1].get("ts", 0), reverse=True)[:5]:
+                doc_meta = by_id.get(did)
+                if doc_meta:
+                    recent_reads.append({
+                        "doc_id": did,
+                        "file_name": doc_meta["file_name"],
+                        "subject": doc_meta["subject"],
+                        "page": info.get("page", 1),
+                    })
+
+            bookmarked_docs = []
+            for did in child_prog.get("bookmarks", [])[:8]:
+                doc_meta = by_id.get(did)
+                if doc_meta:
+                    bookmarked_docs.append({
+                        "doc_id": did,
+                        "file_name": doc_meta["file_name"],
+                        "subject": doc_meta["subject"],
+                        "category": doc_meta["category"],
+                    })
+
+            daily_7d = [
+                {"day": datetime.strptime(d_iso, "%Y-%m-%d").strftime("%a"), "date": d_iso, "count": daily_counts[d_iso]}
+                for d_iso in last_7_days
+            ]
+
+            results.append({
+                "student_id": ch["student_id"],
+                "student_name": ch["student_name"],
+                "grade": ch["grade"],
+                "stream": ch["stream"],
+                "format": ch["format"],
+                "is_linked": bool(ch["child_tg_id"]),
+                "is_shared_phone": is_shared_phone,
+                "invite_url": inv_url,
+                "kpis": {
+                    "pdfs_opened": len(unique_docs_viewed),
+                    "total_views": total_views,
+                    "offline_saved": offline_saved,
+                    "quizzes_taken": len(quiz_trend),
+                    "avg_quiz_pct": avg_quiz_pct,
+                    "quiz_delta_pct": quiz_delta_pct,
+                    "bookmarks_count": len(child_prog.get("bookmarks", [])),
+                    "plan_done": plan_done,
+                    "plan_total": plan_total,
+                    "plan_pct": plan_pct,
+                },
+                "quiz_trend": quiz_trend[-10:],
+                "subject_stats": subject_stats[:6],
+                "daily_7d": daily_7d,
+                "recent_reads": recent_reads,
+                "bookmarked_docs": bookmarked_docs,
+            })
+
+        return {"ok": True, "children_analytics": results}
+
+    # ==========================================================================
+    # ADMIN CONSOLE ROUTES
+    # ==========================================================================
+    @router.get("/api/admin/overview")
+    async def api_admin_overview(request: Request):
+        await require_admin(request)
+        bundle = await get_reg_bundle()
+        cfg = await get_config()
+        items, _, keys_by_id = await get_library_and_keys()
+        today = datetime.now(eat_tz).date()
+
+        regs_out = []
+        counts = {"APPROVED": 0, "NEW": 0, "EXPIRED": 0, "LEFT": 0, "REJECTED": 0}
+        total_refs = 0
+        for rec in bundle["all_regs"]:
+            st = rec["status"]
+            counts[st] = counts.get(st, 0) + 1
+            total_refs += rec["referral_count"]
+            d_left = None
+            if rec["expires_on"]:
+                try:
+                    d_left = (datetime.strptime(rec["expires_on"], "%Y-%m-%d").date() - today).days
+                except ValueError:
+                    pass
+            kids = bundle["children_by_parent"].get(rec["tg_id"], [])
+            regs_out.append({
+                "id": rec["id"],
+                "tg_id": rec["tg_id"],
+                "name": rec["name"],
+                "grade": rec["grade"],
+                "stream": rec["stream"],
+                "phone": rec["phone"],
+                "status": st,
+                "role": rec["role"],
+                "format": rec["format"],
+                "expires_on": rec["expires_on"],
+                "days_left": d_left,
+                "months_paid": rec["months_paid"],
+                "referral_code": rec["referral_code"],
+                "referral_count": rec["referral_count"],
+                "sibling_discount": any(k["sibling_discount"] for k in kids),
+                "children": [
+                    {"name": k["student_name"], "grade": k["grade"], "contact": k["child_contact"], "linked": bool(k["child_tg_id"])}
+                    for k in kids
+                ],
+            })
+
+        verified_links = sum(1 for it in items if it["link_status"] in ("AUTO_VERIFIED", "MANUAL_VERIFIED"))
+        return {
+            "ok": True,
+            "summary": {
+                **counts,
+                "total_students": len(bundle["all_students"]),
+                "total_referrals": total_refs,
+                "total_pdfs": len(items),
+                "verified_links": verified_links,
+                "quiz_keys": len(keys_by_id),
+            },
+            "config": cfg,
+            "registrations": regs_out,
+            "students": bundle["all_students"],
+        }
+
+    @router.post("/api/admin/student-action")
+    async def api_admin_student_action(request: Request):
+        await require_admin(request)
+        body = await request.json()
+        tg_id_str = str(body.get("tg_id", "")).strip()
+        action = body.get("action", "")
+        if not tg_id_str or action not in ("approve", "mark_paid", "mark_left", "reject"):
+            raise HTTPException(status_code=400, detail="Invalid action")
+
+        today = datetime.now(eat_tz).date()
+
+        def _apply():
+            reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
+            rows = reg_sheet.get_all_values()
+            for idx, row in enumerate(rows[1:], start=2):
+                r = row + [""] * (18 - len(row))
+                if r[6].strip() == tg_id_str:
+                    if action in ("approve", "mark_paid"):
+                        is_renewal = action == "mark_paid"
+                        prev_months = int(r[9]) if r[9].isdigit() else 0
+                        new_months = prev_months + 1
+                        new_expires = today + timedelta(days=30)
+                        if is_renewal and r[8]:
+                            try:
+                                old_exp = datetime.strptime(r[8], "%Y-%m-%d").date()
+                                if old_exp >= today:
+                                    new_expires = old_exp + timedelta(days=30)
+                            except ValueError:
+                                pass
+                        app_at = r[7] if (is_renewal and r[7]) else today.isoformat()
+                        exp_str = new_expires.isoformat()
+                        ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                        reg_sheet.update(
+                            values=[[
+                                "APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0",
+                                r[11] or "General", ref_code, r[13], r[14] or "0",
+                                r[15] or "student", r[16] or "Weekend Hub", r[17] or "en",
+                            ]],
+                            range_name=f"E{idx}:R{idx}",
+                        )
+                        credit_info = None
+                        referred_by = r[13].strip().upper()
+                        if prev_months == 0 and referred_by:
+                            for r_idx, r_row in enumerate(rows[1:], start=2):
+                                rr = r_row + [""] * (18 - len(r_row))
+                                if rr[12].strip().upper() == referred_by and rr[6].strip() != tg_id_str:
+                                    nc = (int(rr[14]) if rr[14].isdigit() else 0) + 1
+                                    reg_sheet.update_cell(r_idx, 15, str(nc))
+                                    credit_info = (int(rr[6].strip()), rr[1], referred_by, nc, r[1])
+                                    break
+                        return {"row": r, "ref_code": ref_code, "months": new_months, "exp": exp_str, "is_renewal": is_renewal, "credit": credit_info}
+
+                    new_status = "LEFT" if action == "mark_left" else "REJECTED"
+                    reg_sheet.update_cell(idx, 5, new_status)
+                    return {"row": r, "new_status": new_status}
+            return None
+
+        res = await asyncio.to_thread(_apply)
+        invalidate_reg_cache()
+        if not res:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        bot = get_ptb_app().bot
+        r = res["row"]
+        if action in ("approve", "mark_paid"):
+            try:
+                grade_str = f"{r[2]} ({r[11]})" if r[11] and r[11] != "General" else r[2]
+                pdf_buf = generate_membership_pdf(
+                    student_id=r[0], name=r[1], grade=grade_str, phone=r[3],
+                    tg_id=tg_id_str, months_paid=res["months"], approved_at=today.isoformat(),
+                    expires_on=res["exp"], referral_code=res["ref_code"], is_renewal=res["is_renewal"],
+                )
+                webapp_base = os.getenv("WEBAPP_URL") or os.getenv("RENDER_EXTERNAL_URL") or ""
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open Qelal Hub", web_app=WebAppInfo(url=f"{webapp_base.rstrip('/')}/webapp"))]]) if webapp_base else None
+                await bot.send_document(
+                    chat_id=int(tg_id_str),
+                    document=pdf_buf,
+                    filename=f"Qelal_Pass_{r[1].replace(' ', '_')}_M{res['months']}.pdf",
+                    caption=f"<b>{'Monthly Renewal Confirmed' if res['is_renewal'] else 'Registration Approved'}</b>\nValid until <b>{res['exp']}</b>.",
+                    reply_markup=kb,
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"Pass PDF send failed: {e}")
+            if res["credit"]:
+                c_tg, _, c_code, c_cnt, f_name = res["credit"]
+                try:
+                    await bot.send_message(
+                        chat_id=c_tg,
+                        text=f"<b>Referral Credited:</b> {html.escape(f_name)} was approved using <code>{c_code}</code>. Total verified referrals: <b>{c_cnt}</b>.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+        elif action == "mark_left":
+            try:
+                await bot.send_message(chat_id=int(tg_id_str), text="Your monthly tutoring subscription has ended. Your account is now in 3-PDF Trial mode until renewed.")
+            except Exception:
+                pass
+
+        return {"ok": True}
+
+    @router.post("/api/admin/publish-report")
+    async def api_admin_publish_report(request: Request):
+        await require_admin(request)
+        body = await request.json()
+        student_id = (body.get("student_id") or "").strip()
+        period = (body.get("period") or "").strip()
+        attendance = (body.get("attendance") or "").strip()
+        scores_text = (body.get("scores_text") or "").strip()
+        improved_note = (body.get("improved_note") or "").strip()
+        focus_note = (body.get("focus_note") or "").strip()
+        tutor_name = (body.get("tutor_name") or "Qelal Coordinator").strip()
+
+        if not student_id or not period or not scores_text:
+            raise HTTPException(status_code=400, detail="Student, Period, and Scores are required")
+
+        bundle = await get_reg_bundle()
+        stu = bundle["student_by_id"].get(student_id)
+        if not stu:
+            raise HTTPException(status_code=404, detail="Student not found")
+
+        now_str = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
+        rpt_id = f"RPT-{uuid.uuid4().hex[:5].upper()}"
+
+        def _save_report():
+            _, _, _, _, _, _, _, reports_sheet = get_all_worksheets_fn()
+            reports_sheet.append_row([
+                rpt_id, student_id, period, attendance, scores_text,
+                improved_note, focus_note, "Approved", now_str, tutor_name,
+            ])
+
+        await asyncio.to_thread(_save_report)
+        invalidate_reg_cache()
+
+        target_tg = stu["parent_tg_id"] or stu["child_tg_id"]
+        if target_tg:
+            try:
+                await get_ptb_app().bot.send_message(
+                    chat_id=int(target_tg),
+                    text=(
+                        f"<b>QELAL BI-WEEKLY PROGRESS REPORT</b>\n\n"
+                        f"<b>Student:</b> {html.escape(stu['student_name'])} ({html.escape(stu['grade'])})\n"
+                        f"<b>Period:</b> {html.escape(period)}\n"
+                        f"<b>Attendance:</b> {html.escape(attendance)}\n"
+                        f"<b>Scores:</b> {html.escape(scores_text)}\n"
+                        f"<b>Improved:</b> {html.escape(improved_note)}\n"
+                        f"<b>Next Focus:</b> {html.escape(focus_note)}"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"Could not push report to {target_tg}: {e}")
+
+        return {"ok": True, "report_id": rpt_id}
+
+    @router.post("/api/admin/config")
+    async def api_admin_config(request: Request):
+        await require_admin(request)
+        body = await request.json()
+
+        def _update_cfg():
+            _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
+            rows = cfg_sheet.get_all_values()
+            key_to_row = {r[0].strip(): idx for idx, r in enumerate(rows[1:], start=2) if r and r[0].strip()}
+            mapping = {
+                "LAUNCH_MODE": body.get("LAUNCH_MODE"),
+                "MATRIC_DATE": body.get("MATRIC_DATE"),
+                "GRADE8_MINISTRY_DATE": body.get("GRADE8_MINISTRY_DATE"),
+                "GRADE6_MINISTRY_DATE": body.get("GRADE6_MINISTRY_DATE"),
+                "SEMESTER_DATE": body.get("SEMESTER_DATE"),
+            }
+            updates, appends = [], []
+            for k, v in mapping.items():
+                if v is None:
+                    continue
+                val = str(v).strip()
+                if k in key_to_row:
+                    updates.append({"range": f"B{key_to_row[k]}", "values": [[val]]})
+                else:
+                    appends.append([k, val])
+            if updates:
+                cfg_sheet.batch_update(updates)
+            if appends:
+                cfg_sheet.append_rows(appends, value_input_option="USER_ENTERED")
+
+        await asyncio.to_thread(_update_cfg)
+        invalidate_config_cache()
+        return {"ok": True}
+
+    @router.post("/api/admin/toggle-trial")
+    async def api_admin_toggle_trial(request: Request):
+        await require_admin(request)
+        body = await request.json()
+        doc_id = (body.get("doc_id") or "").strip()
+        is_trial = bool(body.get("is_trial"))
+        _, by_id, _ = await get_library_and_keys()
+        item = by_id.get(doc_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        def _set_trial():
+            _, pdf_sheet, _, _, _, _, _, _ = get_all_worksheets_fn()
+            pdf_sheet.update_cell(item["row_idx"], 22, "YES" if is_trial else "")
+
+        await asyncio.to_thread(_set_trial)
+        invalidate_library_cache()
+        return {"ok": True, "is_trial": is_trial}
+
+    @router.post("/api/admin/broadcast")
+    async def api_admin_broadcast(request: Request):
+        await require_admin(request)
+        body = await request.json()
+        target = (body.get("target") or "all").lower()
+        msg_text = (body.get("message") or "").strip()
+        if not msg_text:
+            raise HTTPException(status_code=400, detail="Message cannot be empty")
+
+        bundle = await get_reg_bundle()
+        filters_map = {
+            "all": lambda r: True,
+            "parents": lambda r: r["role"] == "parent",
+            "approved": lambda r: r["status"] in ("APPROVED", "EXPIRED"),
+            "new": lambda r: r["status"] == "NEW",
+            "natural": lambda r: r["stream"].lower() == "natural",
+            "social": lambda r: r["stream"].lower() == "social",
+            "grade_12": lambda r: r["grade"] == "Grade 12",
+            "grade_8": lambda r: r["grade"] == "Grade 8",
+            "grade_6": lambda r: r["grade"] == "Grade 6",
+        }
+        fn = filters_map.get(target, lambda r: True)
+        recipients = list(dict.fromkeys(int(r["tg_id"]) for r in bundle["all_regs"] if r["tg_id"] and fn(r)))
+
+        bot = get_ptb_app().bot
+        formatted = f"<b>Announcement — Qelal Learning (ቀላል)</b>\n\n{html.escape(msg_text)}"
+        sent = failed = 0
+        for uid in recipients:
+            try:
+                await bot.send_message(chat_id=uid, text=formatted, parse_mode="HTML")
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+
+        return {"ok": True, "sent": sent, "failed": failed}
 
     return router
