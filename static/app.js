@@ -1,15 +1,25 @@
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
+const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+if (tg) {
+  try {
+    tg.ready();
+    tg.expand();
+  } catch {}
+}
 
 window.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && ["s", "p", "S", "P"].includes(e.key)) {
     e.preventDefault();
   }
 });
+
+function ensurePdfJs() {
+  if (!window.pdfjsLib) {
+    throw new Error("PDF viewer library is still loading or blocked by network.");
+  }
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  return window.pdfjsLib;
+}
 
 // ================= SVG ICON LIBRARY =================
 const ICONS = {
@@ -209,13 +219,22 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function fetchJsonSafe(url, opts = {}) {
-  const res = await fetch(url, opts);
-  const raw = await res.text();
-  let data = {};
-  try { data = JSON.parse(raw); } catch { throw new Error(raw.slice(0, 120) || "Server error"); }
-  if (!res.ok) throw new Error(data.detail || "Request failed");
-  return data;
+async function fetchJsonSafe(url, opts = {}, timeoutMs = 22000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...opts, signal: ctrl.signal });
+    const raw = await res.text();
+    let data = {};
+    try { data = JSON.parse(raw); } catch { throw new Error(raw.slice(0, 120) || "Server error"); }
+    if (!res.ok) throw new Error(data.detail || "Request failed");
+    return data;
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Server took too long to respond. Please tap retry.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ================= 1. BOOT & AUTH =================
@@ -228,8 +247,8 @@ async function initApp() {
     const data = await fetchJsonSafe("/api/auth", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: tg.initData || "" }),
-    });
+      body: JSON.stringify({ initData: tg ? (tg.initData || "") : "" }),
+    }, 25000);
 
     document.getElementById("splashView").classList.add("hidden");
 
@@ -419,7 +438,7 @@ document.getElementById("submitRegBtn").onclick = async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        initData: tg.initData || "",
+        initData: tg ? (tg.initData || "") : "",
         role: selectedRole,
         lang: currentLang,
         full_name: fullName,
@@ -786,7 +805,9 @@ function shareChildInvite(idx) {
   const ch = parentAnalytics[idx];
   if (!ch || !ch.invite_url) return;
   const txt = `Open your Qelal Learning Student Hub (${ch.grade}):`;
-  tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(ch.invite_url)}&text=${encodeURIComponent(txt)}`);
+  const url = `https://t.me/share/url?url=${encodeURIComponent(ch.invite_url)}&text=${encodeURIComponent(txt)}`;
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, "_blank");
 }
 
 async function copyChildInvite(idx) {
@@ -1392,7 +1413,9 @@ document.getElementById("shareRefTgBtn").onclick = () => {
   const bot = userProfile.bot_username || "";
   const url = bot ? `https://t.me/${bot}?start=ref_${code}` : "";
   const txt = `Join Qelal Learning (Bishoftu) for Grades 1-12 study materials and practice quizzes. Use my referral code: ${code}`;
-  tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(txt)}`);
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(txt)}`;
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(shareUrl);
+  else window.open(shareUrl, "_blank");
 };
 
 function openRequestModal() { document.getElementById("requestModal").classList.remove("hidden"); }
@@ -1448,19 +1471,20 @@ async function loadActiveReaderDoc() {
   document.getElementById("readerLoadText").textContent = "Opening PDF...";
   loadingEl.classList.remove("hidden");
 
-  const streamUrl = `/api/file/${activeDoc.doc_id}/stream?token=${encodeURIComponent(sessionToken)}`;
-  const isLarge = (activeDoc.file_size_mb || 0) > 8;
-  const pdfOpts = isLarge
-    ? { url: streamUrl, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true }
-    : { url: streamUrl };
-
   try {
+    const pdfLib = ensurePdfJs();
+    const streamUrl = `/api/file/${activeDoc.doc_id}/stream?token=${encodeURIComponent(sessionToken)}`;
+    const isLarge = (activeDoc.file_size_mb || 0) > 8;
+    const pdfOpts = isLarge
+      ? { url: streamUrl, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true }
+      : { url: streamUrl };
+
     if (currentPdfDoc) try { await currentPdfDoc.destroy(); } catch {}
     try {
-      currentPdfDoc = await pdfjsLib.getDocument(pdfOpts).promise;
+      currentPdfDoc = await pdfLib.getDocument(pdfOpts).promise;
     } catch (rangeErr) {
       if (!isLarge) throw rangeErr;
-      currentPdfDoc = await pdfjsLib.getDocument({ url: streamUrl }).promise;
+      currentPdfDoc = await pdfLib.getDocument({ url: streamUrl }).promise;
     }
     document.getElementById("pageCount").textContent = currentPdfDoc.numPages;
     currentPage = Math.min(showingAnswer ? savedAnswerPage : savedMainPage, currentPdfDoc.numPages);
@@ -1499,3 +1523,126 @@ async function renderPage(num) {
     else {
       savedMainPage = num;
       progress.last_read[readerMainDoc.doc_id] = { page: num, ts: Date.now() };
+      saveProgressDebounced();
+    }
+    wrap.scrollTop = 0;
+  } catch {}
+  finally { loadingEl.classList.add("hidden"); }
+}
+
+async function startBubbleSheetMode(docId) {
+  const panel = document.getElementById("bubblePanel");
+  if (!panel.classList.contains("hidden")) { panel.classList.add("hidden"); stopQuizTimer(); return; }
+  activeQuizMeta = await fetchJsonSafe(`/api/quiz/${docId}`, { headers: { Authorization: `Bearer ${sessionToken}` } });
+  quizAnswers = {};
+
+  document.getElementById("bubbleAnsweredCount").textContent = "0";
+  document.getElementById("bubbleTotalCount").textContent = activeQuizMeta.unlocked_q;
+  const grid = document.getElementById("bubbleGrid");
+  grid.innerHTML = "";
+
+  if (activeQuizMeta.trial_limited) {
+    const note = document.createElement("div");
+    note.style.cssText = "font-size:11px;color:#fbbf24;padding:4px 0;";
+    note.textContent = `Preview quiz: first ${activeQuizMeta.unlocked_q} of ${activeQuizMeta.total_q} questions open. Full exams activate after approval.`;
+    grid.appendChild(note);
+  }
+
+  for (let q = 1; q <= activeQuizMeta.unlocked_q; q++) {
+    const row = document.createElement("div");
+    row.className = "b-row";
+    row.innerHTML = `<span class="mono-num"><strong>Q${q}</strong></span><div class="b-opts"></div>`;
+    const opts = row.querySelector(".b-opts");
+    ["A", "B", "C", "D"].forEach((letter) => {
+      const b = document.createElement("button");
+      b.className = "b-opt";
+      b.textContent = letter;
+      b.onclick = () => {
+        quizAnswers[String(q)] = letter;
+        opts.querySelectorAll(".b-opt").forEach((x) => x.classList.remove("selected"));
+        b.classList.add("selected");
+        document.getElementById("bubbleAnsweredCount").textContent = Object.keys(quizAnswers).length;
+      };
+      opts.appendChild(b);
+    });
+    grid.appendChild(row);
+  }
+  panel.classList.remove("hidden");
+  startQuizTimer();
+}
+
+function startQuizTimer() {
+  stopQuizTimer();
+  quizSeconds = 0;
+  quizTimerInt = setInterval(() => {
+    quizSeconds++;
+    const m = String(Math.floor(quizSeconds / 60)).padStart(2, "0");
+    const s = String(quizSeconds % 60).padStart(2, "0");
+    document.getElementById("quizTimerText").textContent = `${m}:${s}`;
+  }, 1000);
+}
+function stopQuizTimer() { if (quizTimerInt) { clearInterval(quizTimerInt); quizTimerInt = null; } }
+
+document.getElementById("submitQuizBtn").onclick = async () => {
+  if (!activeQuizMeta) return;
+  stopQuizTimer();
+  try {
+    const data = await fetchJsonSafe(`/api/quiz/${activeQuizMeta.doc_id}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+      body: JSON.stringify({ answers: quizAnswers }),
+    });
+    const grid = document.getElementById("bubbleGrid");
+    grid.innerHTML = `
+      <div style="background:#1e293b;padding:10px;border-radius:8px;margin-bottom:8px;text-align:center;">
+        <div class="mono-num" style="font-size:17px;font-weight:700;color:#4ade80;">Score: ${data.score} / ${data.total_graded} (${data.percentage}%)</div>
+        ${data.trial_limited ? "<div style='font-size:11px;color:#fbbf24;margin-top:4px;'>Full exam grading activates after enrollment approval.</div>" : ""}
+      </div>
+    `;
+    data.breakdown.forEach((b) => {
+      const r = document.createElement("div");
+      r.className = "b-row";
+      r.innerHTML = `<span class="mono-num"><strong>Q${b.q}</strong></span><span class="mono-num">Yours: <strong>${b.yours}</strong></span><span class="mono-num" style="color:${b.ok ? "#4ade80" : "#f87171"};">${b.ok ? "Correct" : `Key: ${b.correct}`}</span>`;
+      grid.appendChild(r);
+    });
+    parentAnalytics = null;
+  } catch (err) {
+    showToast("Error grading quiz: " + err.message);
+  }
+};
+
+// Event Listeners
+document.getElementById("topQuizCta").onclick = () => switchTab("tabQuiz");
+["searchInput", "gradeFilter", "streamFilter", "subjectFilter", "categoryFilter"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", applyFilters);
+  document.getElementById(id).addEventListener("change", applyFilters);
+});
+document.getElementById("clearFiltersBtn").onclick = () => {
+  ["searchInput", "gradeFilter", "streamFilter", "subjectFilter", "categoryFilter"].forEach((id) => document.getElementById(id).value = "");
+  applyFilters();
+};
+document.getElementById("refreshBtn").onclick = async () => { await loadLibrary(true); showToast("Library refreshed."); };
+document.getElementById("loadMoreBtn").onclick = () => { visibleLimit += 30; renderCards(); };
+document.getElementById("closeReaderBtn").onclick = async () => {
+  stopQuizTimer();
+  document.getElementById("readerModal").classList.add("hidden");
+  if (currentPdfDoc) try { await currentPdfDoc.destroy(); } catch {}
+  currentPdfDoc = null;
+  renderCards();
+};
+document.getElementById("toggleAnswerBtn").onclick = async () => { showingAnswer = !showingAnswer; await loadActiveReaderDoc(); };
+document.getElementById("toggleQuizBtn").onclick = () => readerMainDoc && startBubbleSheetMode(readerMainDoc.doc_id);
+document.getElementById("prevPageBtn").onclick = () => { if (currentPage > 1) { currentPage--; renderPage(currentPage); } };
+document.getElementById("nextPageBtn").onclick = () => { if (currentPdfDoc && currentPage < currentPdfDoc.numPages) { currentPage++; renderPage(currentPage); } };
+document.getElementById("pageInput").onchange = (e) => {
+  const v = parseInt(e.target.value, 10);
+  if (currentPdfDoc && v >= 1 && v <= currentPdfDoc.numPages) { currentPage = v; renderPage(v); }
+};
+document.getElementById("zoomInBtn").onclick = () => { zoomMultiplier = Math.min(2.5, zoomMultiplier + 0.25); document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`; renderPage(currentPage); };
+document.getElementById("zoomOutBtn").onclick = () => { zoomMultiplier = Math.max(0.6, zoomMultiplier - 0.25); document.getElementById("zoomLabel").textContent = `${Math.round(zoomMultiplier * 100)}%`; renderPage(currentPage); };
+document.getElementById("readerSendChatBtn").onclick = () => {
+  const activeDoc = showingAnswer && readerAnswerDoc ? readerAnswerDoc : readerMainDoc;
+  if (activeDoc) sendOfflineTelegram(activeDoc);
+};
+
+initApp();
