@@ -36,6 +36,8 @@ def create_webapp_router(
 ):
     router = APIRouter()
     session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v5").encode()).digest()
+    boot_ver = str(int(time.time()))
+    no_cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
     state = {
         "creds": None,
@@ -465,7 +467,7 @@ def create_webapp_router(
     # ==========================================================================
     @router.get("/favicon.ico")
     async def favicon():
-        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#101318"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#D49B35" font-size="34" font-weight="bold" font-family="sans-serif">ቀ</text></svg>'
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0F2342"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#FBBF24" font-size="34" font-weight="bold" font-family="sans-serif">ቀ</text></svg>'
         return Response(content=svg, media_type="image/svg+xml")
 
     @router.get("/webapp", response_class=HTMLResponse)
@@ -474,7 +476,10 @@ def create_webapp_router(
         if not os.path.exists(html_path):
             return HTMLResponse("<h1>Missing static/index.html</h1>", status_code=500)
         with open(html_path, "r", encoding="utf-8") as f:
-            return HTMLResponse(f.read())
+            content = f.read()
+        content = content.replace('/static/styles.css"', f'/static/styles.css?v={boot_ver}"')
+        content = content.replace('/static/app.js"', f'/static/app.js?v={boot_ver}"')
+        return HTMLResponse(content, headers=no_cache_headers)
 
     @router.get("/static/{file_path:path}")
     async def serve_static_asset(file_path: str):
@@ -482,7 +487,7 @@ def create_webapp_router(
         full_path = os.path.abspath(os.path.join(static_dir, file_path))
         if not full_path.startswith(static_dir) or not os.path.isfile(full_path):
             raise HTTPException(status_code=404, detail="Asset not found")
-        return FileResponse(full_path)
+        return FileResponse(full_path, headers=no_cache_headers)
 
     @router.post("/api/auth")
     async def api_auth(request: Request):
