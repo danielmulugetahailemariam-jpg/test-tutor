@@ -1,3 +1,4 @@
+
 import os
 import json
 import html
@@ -97,6 +98,7 @@ logger = logging.getLogger(__name__)
 
 PENDING_BROADCASTS = {}
 billing_task = None
+_BG_JOBS = {"verify": False, "sync": False}
 
 _SHEETS_LOCK = threading.Lock()
 _SHEETS_READY = False
@@ -275,11 +277,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if linked:
             c_name, c_grade = linked
             await update.message.reply_text(
-                f"✅ <b>Account Linked Successfully! | አካውንቱ ተገናኝቷል!</b>\n\n"
-                f"👋 Welcome <b>{html.escape(c_name)}</b> ({html.escape(c_grade)})!\n"
-                f"Tap below to open your Library, Quizzes &amp; Study Plans!\n\n"
+                f"<b>Account Linked | አካውንቱ ተገናኝቷል</b>\n\n"
+                f"Welcome <b>{html.escape(c_name)}</b> ({html.escape(c_grade)}).\n"
+                f"Tap below to open your Library, Quizzes &amp; Study Plans.\n\n"
                 f"የቀላል የጥናት ማዕከል አካውንትዎ ተከፍቷል። ከታች ያለውን ቁልፍ ተጭነው ይጠቀሙ!",
-                reply_markup=webapp_keyboard("🚀 Open My Study Hub | ክፈት"),
+                reply_markup=webapp_keyboard("Open My Study Hub | ክፈት"),
                 parse_mode="HTML",
             )
             return
@@ -301,32 +303,32 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if existing_reg or child_match:
         name = existing_reg[1][1] if existing_reg else child_match[1]
         await update.message.reply_text(
-            f"👋 <b>Welcome back, {html.escape(name)}! | እንኳን ደህና መጡ!</b>\n\n"
+            f"<b>Welcome back, {html.escape(name)}! | እንኳን ደህና መጡ!</b>\n\n"
             f"Tap below to open your <b>Qelal Learning (ቀላል)</b> Library, Interactive Quizzes, Study Plans &amp; Progress Dashboard.\n\n"
-            f"📞 Need help? Call: <code>+251 933 510 682</code> / <code>+251 988 666 328</code>",
-            reply_markup=webapp_keyboard("🚀 Open Qelal Hub • ቀላልን ክፈት"),
+            f"Need help? Call: <code>+251 933 510 682</code> / <code>+251 988 666 328</code>",
+            reply_markup=webapp_keyboard("Open Qelal Hub · ቀላልን ክፈት"),
             parse_mode="HTML",
         )
         return
 
-    ref_line = f"\n🎁 <b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n" if ref_param else ""
+    ref_line = f"\n<b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n" if ref_param else ""
     welcome_msg = (
-        f"✨ <b>QELAL LEARNING (ቀላል) — Bishoftu Study &amp; Exam Hub</b>\n"
-        f"<i>Effortless Exam Prep. Zero Clutter. Built for Grades 1–12.</i>\n"
+        f"<b>QELAL LEARNING (ቀላል) — Bishoftu Study &amp; Exam Hub</b>\n"
+        f"<i>Built for Grades 1–12.</i>\n"
         f"{ref_line}\n"
-        f"🇬🇧 <b>English:</b>\n"
-        f"Prepare smarter for <b>Grade 6 &amp; 8 Ministry</b>, <b>Grade 12 ESSLCE (Matric)</b>, and school exams with <b>400+ organized textbooks &amp; past papers</b>, <b>auto-graded bubble-sheet quizzes</b>, <b>personalized study plans</b>, and <b>bi-weekly parent progress reports</b> (with <b>sibling discounts</b> for 2+ children!).\n\n"
-        f"🇪🇹 <b>አማርኛ:</b>\n"
+        f"<b>English:</b>\n"
+        f"Prepare for <b>Grade 6 &amp; 8 Ministry</b>, <b>Grade 12 ESSLCE (Matric)</b>, and school exams with <b>400+ organized textbooks &amp; past papers</b>, <b>auto-graded bubble-sheet quizzes</b>, <b>study plans</b>, and <b>parent progress tracking</b> (with <b>sibling discounts</b> for 2+ children).\n\n"
+        f"<b>አማርኛ:</b>\n"
         f"ከ1ኛ–12ኛ ክፍል (ለ6ኛ፣ 8ኛ ሚኒስትሪ እና ለ12ኛ ክፍል ብሔራዊ ፈተና) የሚያዘጋጁ <b>400+ መጽሐፍትና ያለፉ ፈተናዎች</b>፣ <b>ውጤት ወዲያውኑ የሚያሳዩ ጥያቄዎች</b>፣ <b>የጥናት እቅዶች</b> እና <b>ለወላጆች የልጆች ውጤት መከታተያ</b> በአንድ ቦታ!\n\n"
-        f"👉 <b>How to Register | እንዴት መመዝገብ ይችላሉ:</b>\n"
-        f"1️⃣ <b>Online (60 Seconds):</b> Tap below to choose <b>English / አማርኛ</b> and register inside the Mini App.\n"
-        f"2️⃣ <b>Call Us Directly | በስልክ ይደውሉ:</b>\n"
-        f"📞 <code>+251 933 510 682</code>\n"
-        f"📞 <code>+251 988 666 328</code>"
+        f"<b>How to Register | እንዴት መመዝገብ ይችላሉ:</b>\n"
+        f"1. <b>Online (60 Seconds):</b> Tap below to choose <b>English / አማርኛ</b> and register inside the Mini App.\n"
+        f"2. <b>Call Us Directly | በስልክ ይደውሉ:</b>\n"
+        f"<code>+251 933 510 682</code>\n"
+        f"<code>+251 988 666 328</code>"
     )
     await update.message.reply_text(
         welcome_msg,
-        reply_markup=webapp_keyboard("🚀 Launch Qelal Mini App • መተግበሪያውን ክፈት", ref_code=ref_param),
+        reply_markup=webapp_keyboard("Launch Qelal Mini App · መተግበሪያውን ክፈት", ref_code=ref_param),
         parse_mode="HTML",
     )
 
@@ -354,25 +356,25 @@ async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await asyncio.to_thread(_get_or_create_code)
     if not res:
         await update.message.reply_text(
-            "📝 Please launch the Mini App via /start to register and get your Referral Code!\n"
+            "Please launch the Mini App via /start to register and get your Referral Code.\n"
             "እባክዎ መጀመሪያ /start በመጫን ይመዝገቡ።",
-            reply_markup=webapp_keyboard("🚀 Register in Mini App • ተመዝገብ"),
+            reply_markup=webapp_keyboard("Register in Mini App · ተመዝገብ"),
         )
         return
 
     name, code, count = res
     link = referral_invite_url(code)
-    share_text = f"Join me at Qelal Learning (Bishoftu) for Grades 1-12 Exam Prep & Quizzes! Use my code: {code}"
+    share_text = f"Join Qelal Learning (Bishoftu) for Grades 1-12 Exam Prep & Quizzes! Use my code: {code}"
     share_url = f"https://t.me/share/url?url={quote(link)}&text={quote(share_text)}" if link else ""
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Share Invite on Telegram", url=share_url)]]) if share_url else None
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Share Invite on Telegram", url=share_url)]]) if share_url else None
 
     await update.message.reply_text(
-        f"🎁 <b>Study Squad Referral Program | የግብዣ ፕሮግራም</b>\n\n"
-        f"👤 <b>Name:</b> {html.escape(name)}\n"
-        f"🔑 <b>Your Code:</b> <code>{code}</code>\n"
-        f"🤝 <b>Verified Referrals:</b> <b>{count}</b> friend(s)\n"
-        f"{f'🔗 <b>Invite Link:</b> {link}' if link else ''}\n\n"
-        f"💡 <i>Invite 2 friends for Study Squad seating, bound formula folders &amp; tuition perks!</i>",
+        f"<b>Study Squad Referral Program | የግብዣ ፕሮግራም</b>\n\n"
+        f"<b>Name:</b> {html.escape(name)}\n"
+        f"<b>Your Code:</b> <code>{code}</code>\n"
+        f"<b>Verified Referrals:</b> <b>{count}</b> friend(s)\n"
+        f"{f'<b>Invite Link:</b> {link}' if link else ''}\n\n"
+        f"<i>Invite 2 friends for Study Squad seating, bound formula folders &amp; tuition perks.</i>",
         reply_markup=kb,
         parse_mode="HTML",
     )
@@ -386,15 +388,15 @@ async def end_launch_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     cfg = await asyncio.to_thread(get_config_dict)
     if cfg.get("LAUNCH_MODE") == "PAID_GATED":
-        await update.message.reply_text("ℹ️ Launch Phase is already ended. Paid/Approved access mode is active.")
+        await update.message.reply_text("Launch Phase is already ended. Paid/Approved access mode is active.")
         return
 
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔴 Confirm: End Launch Phase", callback_data="launch_confirm:PAID_GATED"),
-        InlineKeyboardButton("❌ Keep Free Launch", callback_data="launch_cancel"),
+        InlineKeyboardButton("Confirm: End Launch Phase", callback_data="launch_confirm:PAID_GATED"),
+        InlineKeyboardButton("Keep Free Launch", callback_data="launch_cancel"),
     ]])
     await update.message.reply_text(
-        "⚠️ <b>Confirm Ending Launch Phase?</b>\n\n"
+        "<b>Confirm Ending Launch Phase?</b>\n\n"
         "• Only <b>APPROVED</b> (and 7-day grace <b>EXPIRED</b>) users keep unlimited access.\n"
         "• All <b>NEW</b> and <b>LEFT</b> users switch to <b>Trial Mode</b> (3 grade books + limited Study Plan + 10-Q Quiz preview).",
         reply_markup=kb,
@@ -407,7 +409,7 @@ async def reopen_launch_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "OPEN_LAUNCH")
     webapp_router.invalidate_config_cache()
-    await update.message.reply_text("🎉 Reopened <b>OPEN_LAUNCH</b> mode (all registered users have unlimited free access).", parse_mode="HTML")
+    await update.message.reply_text("Reopened <b>OPEN_LAUNCH</b> mode (all registered users have unlimited free access).", parse_mode="HTML")
 
 
 async def launch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -417,12 +419,12 @@ async def launch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     if query.data == "launch_cancel":
-        await query.edit_message_text("✅ Kept <b>OPEN_LAUNCH</b> mode active.", parse_mode="HTML")
+        await query.edit_message_text("Kept <b>OPEN_LAUNCH</b> mode active.", parse_mode="HTML")
         return
 
     await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "PAID_GATED")
     webapp_router.invalidate_config_cache()
-    await query.edit_message_text("🔒 <b>Launch Phase Ended!</b> Only approved/paid members now get unlimited access.", parse_mode="HTML")
+    await query.edit_message_text("<b>Launch Phase Ended.</b> Only approved/paid members now get unlimited access.", parse_mode="HTML")
 
 
 # ==============================================================================
@@ -440,13 +442,13 @@ async def send_student_pass_pdf(bot, student_row: list[str], months_paid: int, a
     )
     filename = f"Qelal_Pass_{student_row[1].replace(' ', '_')}_M{months_paid}.pdf"
     caption = (
-        f"🎉 <b>{'Monthly Renewal Confirmed!' if is_renewal else 'Registration Approved! | ምዝገባዎ ጸድቋል!'}</b>\n\n"
-        f"📄 Attached is your official Qelal Pass &amp; Receipt (Valid until <b>{expires_on}</b>).\n"
-        f"📚 Tap below to unlock all 400+ books, exams &amp; full quizzes!"
+        f"<b>{'Monthly Renewal Confirmed' if is_renewal else 'Registration Approved | ምዝገባዎ ጸድቋል'}</b>\n\n"
+        f"Attached is your official Qelal Pass &amp; Receipt (Valid until <b>{expires_on}</b>).\n"
+        f"Tap below to open all 400+ books, exams &amp; full quizzes."
     )
     await bot.send_document(
         chat_id=tg_id, document=pdf_buf, filename=filename, caption=caption,
-        reply_markup=webapp_keyboard("🚀 Open Qelal Hub • ክፈት"), parse_mode="HTML",
+        reply_markup=webapp_keyboard("Open Qelal Hub · ክፈት"), parse_mode="HTML",
     )
 
 
@@ -475,9 +477,9 @@ async def notify_referrer(bot, credit_info):
         await bot.send_message(
             chat_id=ref_tg_id,
             text=(
-                f"🎉 <b>Referral Reward Credited!</b>\n\n"
-                f"<b>{html.escape(friend_name)}</b> was just approved using your code <code>{code}</code>!\n"
-                f"🤝 <b>Verified Referrals:</b> <b>{new_cnt}</b>"
+                f"<b>Referral Reward Credited</b>\n\n"
+                f"<b>{html.escape(friend_name)}</b> was approved using your code <code>{code}</code>.\n"
+                f"<b>Verified Referrals:</b> <b>{new_cnt}</b>"
             ),
             parse_mode="HTML",
         )
@@ -496,19 +498,19 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = await asyncio.to_thread(_fetch)
     new_leads = [row for row in rows[1:] if len(row) >= 5 and row[4].strip().upper() == "NEW"]
     if not new_leads:
-        await update.message.reply_text("✅ All caught up! No NEW registrations right now.")
+        await update.message.reply_text("All caught up. No NEW registrations right now.")
         return
 
-    msg = f"🔔 <b>PENDING REGISTRATIONS ({len(new_leads)}):</b>\n\n"
+    msg = f"<b>PENDING REGISTRATIONS ({len(new_leads)}):</b>\n\n"
     buttons = []
     for row in new_leads:
         r = row + [""] * (18 - len(row))
-        role_tag = "👨‍👩‍👧 Parent" if r[15] == "parent" else "🎓 Student"
-        msg += f"• {role_tag} <b>{html.escape(r[1])}</b> | {html.escape(r[2])} | <code>{html.escape(r[3])}</code>\n"
+        role_tag = "Parent" if r[15] == "parent" else "Student"
+        msg += f"• {role_tag}: <b>{html.escape(r[1])}</b> | {html.escape(r[2])} | <code>{html.escape(r[3])}</code>\n"
         if r[6].strip():
-            buttons.append([InlineKeyboardButton(f"✅ Approve {r[1]}", callback_data=f"approve_user:{r[6].strip()}")])
+            buttons.append([InlineKeyboardButton(f"Approve {r[1]}", callback_data=f"approve_user:{r[6].strip()}")])
 
-    buttons.append([InlineKeyboardButton("✔️ Approve All NEW Leads", callback_data="approve_all_new")])
+    buttons.append([InlineKeyboardButton("Approve All NEW Leads", callback_data="approve_all_new")])
     await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
 
 
@@ -561,7 +563,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
         for ci in ref_credits:
             await notify_referrer(context.bot, ci)
 
-        await query.edit_message_text(f"✅ Approved <b>{len(approved_list)}</b> account(s) and sent PDF passes!", parse_mode="HTML")
+        await query.edit_message_text(f"Approved <b>{len(approved_list)}</b> account(s) and sent PDF passes.", parse_mode="HTML")
         return
 
     action, tg_id_str = data.split(":", 1)
@@ -604,7 +606,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
         res = await asyncio.to_thread(_activate_or_renew)
         webapp_router.invalidate_reg_cache()
         if not res:
-            await query.edit_message_text("⚠️ Record not found in Google Sheet.")
+            await query.edit_message_text("Record not found in Google Sheet.")
             return
 
         r, months, issue_date, exp_str, c_info = res
@@ -614,9 +616,9 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
             logger.warning(f"Could not send PDF pass to {tg_id_str}: {e}")
         await notify_referrer(context.bot, c_info)
 
-        ref_note = f"\n🎁 Credited referral to {html.escape(c_info[1])} (Total: {c_info[3]})" if c_info else ""
+        ref_note = f"\nCredited referral to {html.escape(c_info[1])} (Total: {c_info[3]})" if c_info else ""
         await query.edit_message_text(
-            f"{'💰 Renewed' if is_renewal else '✅ Approved'} <b>{html.escape(r[1])}</b> (Month #{months}, Valid until <b>{exp_str}</b>).{ref_note}",
+            f"{'Renewed' if is_renewal else 'Approved'} <b>{html.escape(r[1])}</b> (Month #{months}, Valid until <b>{exp_str}</b>).{ref_note}",
             parse_mode="HTML",
         )
         return
@@ -639,11 +641,11 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
                 try:
                     await context.bot.send_message(
                         chat_id=int(tg_id_str),
-                        text="ℹ️ Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.",
+                        text="Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.",
                     )
                 except Exception:
                     pass
-            await query.edit_message_text(f"{'🚪 Marked LEFT' if new_status == 'LEFT' else '❌ Rejected'}: <b>{html.escape(name)}</b>", parse_mode="HTML")
+            await query.edit_message_text(f"{'Marked LEFT' if new_status == 'LEFT' else 'Rejected'}: <b>{html.escape(name)}</b>", parse_mode="HTML")
 
 
 # ==============================================================================
@@ -669,7 +671,7 @@ async def review_reports_command(update: Update, context: ContextTypes.DEFAULT_T
 
     pending = await asyncio.to_thread(_fetch)
     if not pending:
-        await update.message.reply_text("✅ All progress reports reviewed! No Pending_Admin rows.")
+        await update.message.reply_text("All progress reports reviewed. No Pending_Admin rows.")
         return
 
     for row_idx, rp, stu in pending:
@@ -677,19 +679,19 @@ async def review_reports_command(update: Update, context: ContextTypes.DEFAULT_T
         s_grade = stu[2] if stu else ""
         p_tg = stu[5] if stu else "Not Linked"
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Approve & Send", callback_data=f"rpt_approve:{row_idx}"),
-            InlineKeyboardButton("⏸ Hold", callback_data=f"rpt_hold:{row_idx}"),
-            InlineKeyboardButton("❌ Skip", callback_data=f"rpt_skip:{row_idx}"),
+            InlineKeyboardButton("Approve & Send", callback_data=f"rpt_approve:{row_idx}"),
+            InlineKeyboardButton("Hold", callback_data=f"rpt_hold:{row_idx}"),
+            InlineKeyboardButton("Skip", callback_data=f"rpt_skip:{row_idx}"),
         ]])
         await update.message.reply_text(
-            f"📋 <b>APPROVE PROGRESS REPORT?</b>\n"
-            f"👤 <b>Student:</b> {html.escape(s_name)} ({html.escape(s_grade)})\n"
-            f"🗓 <b>Period:</b> {html.escape(rp[2])} | 👨‍🏫 {html.escape(rp[9] or 'Tutor')}\n"
-            f"✅ <b>Attendance:</b> {html.escape(rp[3])}\n"
-            f"📊 <b>Scores:</b> {html.escape(rp[4])}\n"
-            f"🔼 <b>Improved:</b> {html.escape(rp[5])}\n"
-            f"🎯 <b>Next Focus:</b> {html.escape(rp[6])}\n"
-            f"👨‍👩‍👧 <b>Parent TG:</b> <code>{p_tg}</code>",
+            f"<b>APPROVE PROGRESS REPORT?</b>\n"
+            f"<b>Student:</b> {html.escape(s_name)} ({html.escape(s_grade)})\n"
+            f"<b>Period:</b> {html.escape(rp[2])} | {html.escape(rp[9] or 'Tutor')}\n"
+            f"<b>Attendance:</b> {html.escape(rp[3])}\n"
+            f"<b>Scores:</b> {html.escape(rp[4])}\n"
+            f"<b>Improved:</b> {html.escape(rp[5])}\n"
+            f"<b>Next Focus:</b> {html.escape(rp[6])}\n"
+            f"<b>Parent TG:</b> <code>{p_tg}</code>",
             reply_markup=kb,
             parse_mode="HTML",
         )
@@ -734,24 +736,24 @@ async def handle_report_decision(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.send_message(
                     chat_id=int(parent_tg),
                     text=(
-                        f"📊 <b>QELAL BI-WEEKLY PROGRESS REPORT</b>\n\n"
-                        f"👤 <b>Student:</b> {html.escape(s_name)} ({html.escape(stu[2])})\n"
-                        f"🗓 <b>Period:</b> {html.escape(rp[2])}\n"
-                        f"✅ <b>Attendance:</b> {html.escape(rp[3])}\n"
-                        f"📈 <b>Scores:</b> {html.escape(rp[4])}\n"
-                        f"🔼 <b>Improved:</b> {html.escape(rp[5])}\n"
-                        f"🎯 <b>Next Focus:</b> {html.escape(rp[6])}"
+                        f"<b>QELAL BI-WEEKLY PROGRESS REPORT</b>\n\n"
+                        f"<b>Student:</b> {html.escape(s_name)} ({html.escape(stu[2])})\n"
+                        f"<b>Period:</b> {html.escape(rp[2])}\n"
+                        f"<b>Attendance:</b> {html.escape(rp[3])}\n"
+                        f"<b>Scores:</b> {html.escape(rp[4])}\n"
+                        f"<b>Improved:</b> {html.escape(rp[5])}\n"
+                        f"<b>Next Focus:</b> {html.escape(rp[6])}"
                     ),
-                    reply_markup=webapp_keyboard("📊 View in Parent Dashboard"),
+                    reply_markup=webapp_keyboard("View in Parent Dashboard"),
                     parse_mode="HTML",
                 )
             except Exception as e:
                 logger.warning(f"Could not send report to parent {parent_tg}: {e}")
-        await query.edit_message_text(f"✅ Approved &amp; published report for <b>{html.escape(s_name)}</b>!", parse_mode="HTML")
+        await query.edit_message_text(f"Approved &amp; published report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
     elif action == "rpt_hold":
-        await query.edit_message_text(f"⏸ Held report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+        await query.edit_message_text(f"Held report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
     else:
-        await query.edit_message_text(f"❌ Skipped report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+        await query.edit_message_text(f"Skipped report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
 
 
 # ==============================================================================
@@ -800,30 +802,30 @@ async def run_daily_billing_check(bot):
     for kind, name, grade, phone, tg_id, day_num, days_left in alerts:
         safe_name, safe_phone = html.escape(name), html.escape(phone)
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("💰 Paid (+30d)", callback_data=f"mark_paid:{tg_id}"),
-            InlineKeyboardButton("🚪 Mark Left", callback_data=f"mark_left:{tg_id}"),
+            InlineKeyboardButton("Paid (+30d)", callback_data=f"mark_paid:{tg_id}"),
+            InlineKeyboardButton("Mark Left", callback_data=f"mark_left:{tg_id}"),
         ]])
         if kind == "REMINDER":
             await bot.send_message(
                 chat_id=ADMIN_USER_ID,
-                text=f"⏰ <b>Renewal Reminder — Day {day_num}/30 ({days_left}d left)</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>",
+                text=f"<b>Renewal Reminder — Day {day_num}/30 ({days_left}d left)</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>",
                 reply_markup=kb, parse_mode="HTML",
             )
         elif kind == "GRACE":
             await bot.send_message(
                 chat_id=ADMIN_USER_ID,
-                text=f"⚠️ <b>EXPIRED (Grace Day {day_num - 30}/7 — Day {day_num})</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>\n<i>User keeps access during the 7-day grace window.</i>",
+                text=f"<b>EXPIRED (Grace Day {day_num - 30}/7 — Day {day_num})</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>\n<i>User keeps access during the 7-day grace window.</i>",
                 reply_markup=kb, parse_mode="HTML",
             )
         elif kind == "AUTO_LEFT":
             await bot.send_message(
                 chat_id=ADMIN_USER_ID,
-                text=f"🔴 <b>AUTO-MOVED TO LEFT (Day {day_num})</b>\n👤 {safe_name} ({html.escape(grade)})\n📞 <code>{safe_phone}</code>\n<i>Grace week ended. Downgraded to Trial.</i>",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💰 Reactivate (Paid)", callback_data=f"mark_paid:{tg_id}")]]),
+                text=f"<b>AUTO-MOVED TO LEFT (Day {day_num})</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>\n<i>Grace week ended. Downgraded to Trial.</i>",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Reactivate (Paid)", callback_data=f"mark_paid:{tg_id}")]]),
                 parse_mode="HTML",
             )
             try:
-                await bot.send_message(chat_id=int(tg_id), text="ℹ️ Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.")
+                await bot.send_message(chat_id=int(tg_id), text="Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.")
             except Exception:
                 pass
     return len(alerts)
@@ -834,7 +836,7 @@ async def check_billing_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
     sent = await run_daily_billing_check(context.bot)
     if sent == 0:
-        await update.message.reply_text("✅ Billing check complete — no new reminders or expirations today.")
+        await update.message.reply_text("Billing check complete — no new reminders or expirations today.")
 
 
 async def billing_scheduler_loop(bot):
@@ -848,7 +850,7 @@ async def billing_scheduler_loop(bot):
 
 
 # ==============================================================================
-# 6. STATS, BROADCASTS, SMART LINK VERIFIER & DRIVE SYNC
+# 6. STATS, BROADCASTS, BACKGROUND SMART LINK VERIFIER & DRIVE SYNC
 # ==============================================================================
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -895,21 +897,21 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     launch_mode, counts, total_students, total_refs, upcoming, total_pdfs, total_keys, verified_links, needs_review, unlinked_ans, top_docs = await asyncio.to_thread(_gather)
 
     lines = [
-        "📊 <b>QELAL LEARNING — ADMIN STATS</b>\n",
-        f"🚦 <b>Mode:</b> <code>{launch_mode}</code> ({'/end_launch to gate' if launch_mode == 'OPEN_LAUNCH' else 'Paid/Approved Gated'})",
-        f"👥 <b>Accounts:</b> {counts.get('APPROVED',0)} Approved | {counts.get('NEW',0)} Pending | {counts.get('EXPIRED',0)} Grace | {counts.get('LEFT',0)} Left",
-        f"🎓 <b>Total Enrolled Students:</b> {total_students} | 🤝 <b>Referrals:</b> {total_refs}",
-        f"📚 <b>Library:</b> {total_pdfs} Resources | {verified_links} Verified Links | {total_keys} Quiz Keys",
-        f"⚠️ <b>Link Review Needed:</b> {needs_review} | <b>Unlinked Answers:</b> {unlinked_ans}\n",
+        "<b>QELAL LEARNING — ADMIN STATS</b>\n",
+        f"<b>Mode:</b> <code>{launch_mode}</code> ({'/end_launch to gate' if launch_mode == 'OPEN_LAUNCH' else 'Paid/Approved Gated'})",
+        f"<b>Accounts:</b> {counts.get('APPROVED',0)} Approved | {counts.get('NEW',0)} Pending | {counts.get('EXPIRED',0)} Grace | {counts.get('LEFT',0)} Left",
+        f"<b>Total Enrolled Students:</b> {total_students} | <b>Referrals:</b> {total_refs}",
+        f"<b>Library:</b> {total_pdfs} Resources | {verified_links} Verified Links | {total_keys} Quiz Keys",
+        f"<b>Link Review Needed:</b> {needs_review} | <b>Unlinked Answers:</b> {unlinked_ans}\n",
     ]
     if upcoming:
-        lines.append("⏳ <b>Days Left (Closest Renewals):</b>")
+        lines.append("<b>Days Left (Closest Renewals):</b>")
         for d_left, name, grade, st in upcoming:
             badge = f"{d_left}d left" if d_left >= 0 else f"EXPIRED {-d_left}d ago"
             lines.append(f"• {html.escape(name)} ({html.escape(grade)}): <b>{badge}</b> [{st}]")
         lines.append("")
     if top_docs:
-        lines.append("🔥 <b>Most Popular Resources:</b>")
+        lines.append("<b>Most Popular Resources:</b>")
         for fname, hits in top_docs:
             lines.append(f"• {html.escape(fname[:40])} — <b>{hits}</b> actions")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -921,7 +923,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.partition(" ")[2].strip()
     if not raw:
         await update.message.reply_text(
-            "📢 <b>How to use /broadcast:</b>\n\n"
+            "<b>How to use /broadcast:</b>\n\n"
             "• <code>/broadcast All Hello everyone, check the library!</code>\n"
             "• <code>/broadcast Parents Bi-weekly progress reports are ready!</code>\n"
             "• <code>/broadcast Grade 12 New 2018 Physics Model uploaded!</code>\n"
@@ -953,7 +955,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if not message_text:
-        await update.message.reply_text("⚠️ Write a message after the target group.")
+        await update.message.reply_text("Write a message after the target group.")
         return
 
     def _get_recipients():
@@ -967,17 +969,17 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     recipients = await asyncio.to_thread(_get_recipients)
     if not recipients:
-        await update.message.reply_text(f"⚠️ No accounts matched target: <b>{target_label}</b>", parse_mode="HTML")
+        await update.message.reply_text(f"No accounts matched target: <b>{target_label}</b>", parse_mode="HTML")
         return
 
     bid = str(update.message.message_id)
     PENDING_BROADCASTS[bid] = {"recipients": recipients, "text": message_text, "target": target_label}
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"🚀 Send to {len(recipients)} Users", callback_data=f"bc_send:{bid}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"bc_cancel:{bid}"),
+        InlineKeyboardButton(f"Send to {len(recipients)} Users", callback_data=f"bc_send:{bid}"),
+        InlineKeyboardButton("Cancel", callback_data=f"bc_cancel:{bid}"),
     ]])
     await update.message.reply_text(
-        f"📢 <b>Broadcast Preview</b>\n🎯 <b>Target:</b> {target_label} ({len(recipients)} users)\n\n<i>{html.escape(message_text)}</i>",
+        f"<b>Broadcast Preview</b>\n<b>Target:</b> {target_label} ({len(recipients)} users)\n\n<i>{html.escape(message_text)}</i>",
         reply_markup=kb, parse_mode="HTML",
     )
 
@@ -991,13 +993,13 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     payload = PENDING_BROADCASTS.pop(bid, None)
     if action == "bc_cancel" or not payload:
         await query.answer("Cancelled")
-        await query.edit_message_text("❌ Broadcast cancelled.")
+        await query.edit_message_text("Broadcast cancelled.")
         return
 
     await query.answer("Sending...")
-    await query.edit_message_text(f"📤 Sending to {len(payload['recipients'])} users...")
+    await query.edit_message_text(f"Sending to {len(payload['recipients'])} users...")
     sent = failed = 0
-    formatted = f"📢 <b>Announcement — Qelal Learning (ቀላል)</b>\n\n{html.escape(payload['text'])}"
+    formatted = f"<b>Announcement — Qelal Learning (ቀላል)</b>\n\n{html.escape(payload['text'])}"
     for uid in payload["recipients"]:
         try:
             await context.bot.send_message(chat_id=uid, text=formatted, parse_mode="HTML")
@@ -1006,159 +1008,246 @@ async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             failed += 1
         await asyncio.sleep(0.05)
 
-    await query.edit_message_text(f"✅ <b>Broadcast Complete!</b>\n🎯 Target: {payload['target']}\n📨 Sent: {sent} | Failed: {failed}", parse_mode="HTML")
+    await query.edit_message_text(f"<b>Broadcast Complete.</b>\nTarget: {payload['target']}\nSent: {sent} | Failed: {failed}", parse_mode="HTML")
 
 
-async def download_doc_bytes(drive_token: str | None, drive_pdf_id: str, telegram_file_id: str) -> bytes | None:
-    if drive_pdf_id and drive_token:
-        url = f"https://www.googleapis.com/drive/v3/files/{drive_pdf_id}?alt=media&supportsAllDrives=true"
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            r = await client.get(url, headers={"Authorization": f"Bearer {drive_token}"})
+async def download_doc_bytes_safe(http_client: httpx.AsyncClient, creds: Credentials, drive_pdf_id: str, telegram_file_id: str) -> bytes | None:
+    try:
+        if drive_pdf_id:
+            if not creds.valid:
+                await asyncio.to_thread(creds.refresh, GoogleAuthRequest())
+            url = f"https://www.googleapis.com/drive/v3/files/{drive_pdf_id}?alt=media&supportsAllDrives=true"
+            r = await http_client.get(url, headers={"Authorization": f"Bearer {creds.token}"})
             if r.status_code == 200:
                 return r.content
-    if telegram_file_id:
-        tg_file = await ptb_app.bot.get_file(telegram_file_id)
-        f_url = tg_file.file_path if tg_file.file_path.startswith("http") else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            r = await client.get(f_url)
+            logger.warning(f"Drive download HTTP {r.status_code} for {drive_pdf_id}")
+        if telegram_file_id:
+            tg_file = await ptb_app.bot.get_file(telegram_file_id)
+            f_url = tg_file.file_path if tg_file.file_path.startswith("http") else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
+            r = await http_client.get(f_url)
             if r.status_code == 200:
                 return r.content
+    except Exception as e:
+        logger.warning(f"Safe download failed ({drive_pdf_id or telegram_file_id}): {e}")
     return None
+
+
+async def _run_verify_links_bg(status_msg, force: bool = False):
+    MAX_DOWNLOADS_PER_RUN = 40
+    try:
+        def _load():
+            _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
+            creds = get_credentials()
+            if not creds.valid:
+                creds.refresh(GoogleAuthRequest())
+            return pdf_sheet, keys_sheet, pdf_sheet.get_all_values(), keys_sheet.get_all_values(), creds
+
+        pdf_sheet, keys_sheet, pdf_rows, key_rows, creds = await asyncio.to_thread(_load)
+        by_id = {(row + [""] * (22 - len(row)))[0]: (idx, row + [""] * (22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
+        existing_key_ids = {r[0] for r in key_rows[1:] if r}
+
+        pdf_updates, new_keys = [], []
+        verified_count = rejected_count = review_count = embedded_keys_parsed = newly_discovered = 0
+        downloads_done = 0
+        reached_batch_limit = False
+        now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+        exam_cache, ans_cache = {}, {}
+
+        def _flush():
+            if pdf_updates:
+                for i in range(0, len(pdf_updates), 200):
+                    pdf_sheet.batch_update(pdf_updates[i : i + 200])
+                pdf_updates.clear()
+            if new_keys:
+                keys_sheet.append_rows(new_keys, value_input_option="USER_ENTERED")
+                new_keys.clear()
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+            async def get_exam_analysis(doc_id, r):
+                nonlocal downloads_done
+                if doc_id not in exam_cache:
+                    downloads_done += 1
+                    b = await download_doc_bytes_safe(http_client, creds, r[15], r[17])
+                    exam_cache[doc_id] = await asyncio.to_thread(analyze_exam_pdf, b) if b else None
+                return exam_cache[doc_id]
+
+            async def get_ans_analysis(doc_id, r):
+                nonlocal downloads_done
+                if doc_id not in ans_cache:
+                    downloads_done += 1
+                    b = await download_doc_bytes_safe(http_client, creds, r[15], r[17])
+                    ans_cache[doc_id] = await asyncio.to_thread(analyze_answer_pdf, b) if b else None
+                return ans_cache[doc_id]
+
+            processed_since_flush = 0
+
+            async def tick_checkpoint():
+                nonlocal processed_since_flush
+                processed_since_flush += 1
+                if processed_since_flush >= 8:
+                    processed_since_flush = 0
+                    await asyncio.to_thread(_flush)
+                    webapp_router.invalidate_library_cache()
+                    try:
+                        await status_msg.edit_text(
+                            f"Verifying PDFs in background...\n"
+                            f"Downloads: <b>{downloads_done}/{MAX_DOWNLOADS_PER_RUN}</b> | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
+            # 1. Verify existing filename-linked pairs + embedded-answer exams
+            for doc_id, (row_idx, r) in by_id.items():
+                if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                    reached_batch_limit = True
+                    break
+                cat, linked_id, link_status = r[5], r[10], r[20]
+                size_mb = float(r[13]) if r[13] else 0.0
+
+                if cat != "Answer Sheet" and linked_id and linked_id in by_id:
+                    if not force and link_status in ("AUTO_VERIFIED", "MANUAL_VERIFIED", "REJECTED_MISMATCH", "NEEDS_REVIEW") and (
+                        link_status not in ("AUTO_VERIFIED", "MANUAL_VERIFIED") or doc_id in existing_key_ids
+                    ):
+                        continue
+
+                    ans_row_idx, ans_r = by_id[linked_id]
+                    ans_size = float(ans_r[13]) if ans_r[13] else 0.0
+                    if size_mb > 25 or ans_size > 25:
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
+                        review_count += 1
+                        await tick_checkpoint()
+                        continue
+
+                    ex_info = await get_exam_analysis(doc_id, r)
+                    ans_info = await get_ans_analysis(linked_id, ans_r)
+                    if not ex_info or not ans_info:
+                        continue
+
+                    result = score_exam_answer_match(ex_info, ans_info, same_round_hint=(r[8] == ans_r[8]))
+                    if result["status"] == "AUTO_VERIFIED":
+                        verified_count += 1
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_row_idx}", "values": [["AUTO_VERIFIED"]]}])
+                        if result["answers"] and doc_id not in existing_key_ids:
+                            new_keys.append([doc_id, result["total_q"], json.dumps(result["sections"]), json.dumps(result["answers"]), linked_id, now_str])
+                            existing_key_ids.add(doc_id)
+                    elif result["status"] == "REJECTED_MISMATCH":
+                        rejected_count += 1
+                        r[10] = ""
+                        ans_r[10] = ""
+                        pdf_updates.extend([
+                            {"range": f"K{row_idx}", "values": [[""]]}, {"range": f"K{ans_row_idx}", "values": [[""]]},
+                            {"range": f"U{row_idx}", "values": [["REJECTED_MISMATCH"]]}, {"range": f"U{ans_row_idx}", "values": [["REJECTED_MISMATCH"]]},
+                        ])
+                    else:
+                        review_count += 1
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
+                    await tick_checkpoint()
+
+                elif r[11] == "Yes" and cat in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") and doc_id not in existing_key_ids and size_mb <= 25:
+                    if not force and link_status == "NEEDS_REVIEW":
+                        continue
+                    ex_info = await get_exam_analysis(doc_id, r)
+                    if ex_info:
+                        emb = ex_info.get("embedded_answers") or {}
+                        if len(emb) >= 15:
+                            new_keys.append([doc_id, max(int(k) for k in emb.keys()), json.dumps(ex_info.get("sections", [])), json.dumps(emb), doc_id, now_str])
+                            existing_key_ids.add(doc_id)
+                            embedded_keys_parsed += 1
+                        elif ex_info.get("is_scanned"):
+                            pdf_updates.append({"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]})
+                    await tick_checkpoint()
+
+            # 2. Smart discovery for unlinked Answer Sheets (filtered by Subject, Year & Exam_Tag!)
+            if not reached_batch_limit:
+                for ans_id, (ans_idx, ans_r) in by_id.items():
+                    if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                        reached_batch_limit = True
+                        break
+                    if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
+                        continue
+                    if not force and ans_r[20] in ("NEEDS_REVIEW", "REJECTED_MISMATCH"):
+                        continue
+
+                    ans_info = await get_ans_analysis(ans_id, ans_r)
+                    if not ans_info or ans_info.get("is_scanned") or ans_info.get("looks_like_question_paper"):
+                        pdf_updates.append({"range": f"U{ans_idx}", "values": [["NEEDS_REVIEW"]]})
+                        continue
+
+                    best_match = None
+                    for ex_id, (ex_idx, ex_r) in by_id.items():
+                        if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                            reached_batch_limit = True
+                            break
+                        if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
+                            continue
+                        if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):
+                            continue
+                        if ex_r[6] and ans_r[6] and ex_r[6] != ans_r[6]:
+                            continue
+                        if ex_r[7] and ans_r[7] and ex_r[7] != ans_r[7]:
+                            continue
+
+                        ex_info = await get_exam_analysis(ex_id, ex_r)
+                        if not ex_info:
+                            continue
+                        res = score_exam_answer_match(ex_info, ans_info, same_round_hint=(ex_r[8] == ans_r[8]))
+                        if res["status"] == "AUTO_VERIFIED":
+                            if not best_match or res["score"] > best_match[0]:
+                                best_match = (res["score"], ex_id, ex_idx, res)
+
+                    if best_match:
+                        _, ex_id, ex_idx, res = best_match
+                        by_id[ex_id][1][10] = ans_id
+                        ans_r[10] = ex_id
+                        newly_discovered += 1
+                        pdf_updates.extend([
+                            {"range": f"K{ex_idx}", "values": [[ans_id]]}, {"range": f"K{ans_idx}", "values": [[ex_id]]},
+                            {"range": f"U{ex_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_idx}", "values": [["AUTO_VERIFIED"]]},
+                        ])
+                        if res["answers"] and ex_id not in existing_key_ids:
+                            new_keys.append([ex_id, res["total_q"], json.dumps(res["sections"]), json.dumps(res["answers"]), ans_id, now_str])
+                            existing_key_ids.add(ex_id)
+                    else:
+                        pdf_updates.append({"range": f"U{ans_idx}", "values": [["NEEDS_REVIEW"]]})
+                    await tick_checkpoint()
+
+        await asyncio.to_thread(_flush)
+        webapp_router.invalidate_library_cache()
+
+        more_note = "\n\n<b>Batch limit reached (40 PDFs).</b> Run /verify_links again to continue the remaining files." if reached_batch_limit else ""
+        review_note = "\nSend /review_links to confirm scanned pairs." if review_count else ""
+
+        await status_msg.edit_text(
+            f"<b>PDF Content Verification Finished</b>\n\n"
+            f"<b>Auto-Verified:</b> {verified_count} (+{newly_discovered} matched by content)\n"
+            f"<b>False Links Removed:</b> {rejected_count}\n"
+            f"<b>Needs Review:</b> {review_count}\n"
+            f"<b>Total Quiz Keys Saved:</b> {len(existing_key_ids)} ({embedded_keys_parsed} embedded)"
+            f"{more_note}{review_note}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Background verify_links failed")
+        try:
+            await status_msg.edit_text(f"Verification stopped: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _BG_JOBS["verify"] = False
 
 
 async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
-    status_msg = await update.message.reply_text("🔍 Inspecting PDFs to verify & smart-match Exam ↔ Answer links...")
+    if _BG_JOBS["verify"]:
+        await update.message.reply_text("Verification is already running in the background—please wait.")
+        return
 
-    def _load():
-        _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
-        creds = get_credentials()
-        if not creds.valid:
-            creds.refresh(GoogleAuthRequest())
-        return pdf_sheet, keys_sheet, pdf_sheet.get_all_values(), keys_sheet.get_all_values(), creds.token
-
-    pdf_sheet, keys_sheet, pdf_rows, key_rows, drive_token = await asyncio.to_thread(_load)
-    by_id = {(row + [""] * (22 - len(row)))[0]: (idx, row + [""] * (22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
-    existing_key_ids = {r[0] for r in key_rows[1:] if r}
-
-    pdf_updates, new_keys = [], []
-    verified_count = rejected_count = review_count = embedded_keys_parsed = newly_discovered = 0
-    now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
-
-    exam_cache, ans_cache = {}, {}
-
-    async def get_exam_analysis(doc_id, r):
-        if doc_id not in exam_cache:
-            b = await download_doc_bytes(drive_token, r[15], r[17])
-            exam_cache[doc_id] = await asyncio.to_thread(analyze_exam_pdf, b) if b else None
-        return exam_cache[doc_id]
-
-    async def get_ans_analysis(doc_id, r):
-        if doc_id not in ans_cache:
-            b = await download_doc_bytes(drive_token, r[15], r[17])
-            ans_cache[doc_id] = await asyncio.to_thread(analyze_answer_pdf, b) if b else None
-        return ans_cache[doc_id]
-
-    for doc_id, (row_idx, r) in by_id.items():
-        cat, linked_id, link_status = r[5], r[10], r[20]
-        size_mb = float(r[13]) if r[13] else 0.0
-
-        if cat != "Answer Sheet" and linked_id and linked_id in by_id:
-            if link_status in ("AUTO_VERIFIED", "MANUAL_VERIFIED") and doc_id in existing_key_ids:
-                continue
-            ans_row_idx, ans_r = by_id[linked_id]
-            ans_size = float(ans_r[13]) if ans_r[13] else 0.0
-            if size_mb > 25 or ans_size > 25:
-                pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
-                review_count += 1
-                continue
-
-            ex_info = await get_exam_analysis(doc_id, r)
-            ans_info = await get_ans_analysis(linked_id, ans_r)
-            if not ex_info or not ans_info:
-                continue
-
-            result = score_exam_answer_match(ex_info, ans_info, same_round_hint=(r[8] == ans_r[8]))
-            if result["status"] == "AUTO_VERIFIED":
-                verified_count += 1
-                pdf_updates.extend([{"range": f"U{row_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_row_idx}", "values": [["AUTO_VERIFIED"]]}])
-                if result["answers"] and doc_id not in existing_key_ids:
-                    new_keys.append([doc_id, result["total_q"], json.dumps(result["sections"]), json.dumps(result["answers"]), linked_id, now_str])
-                    existing_key_ids.add(doc_id)
-            elif result["status"] == "REJECTED_MISMATCH":
-                rejected_count += 1
-                r[10] = ""
-                ans_r[10] = ""
-                pdf_updates.extend([
-                    {"range": f"K{row_idx}", "values": [[""]]}, {"range": f"K{ans_row_idx}", "values": [[""]]},
-                    {"range": f"U{row_idx}", "values": [["REJECTED_MISMATCH"]]}, {"range": f"U{ans_row_idx}", "values": [["REJECTED_MISMATCH"]]},
-                ])
-            else:
-                review_count += 1
-                pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
-
-        elif r[11] == "Yes" and cat in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") and doc_id not in existing_key_ids and size_mb <= 25:
-            ex_info = await get_exam_analysis(doc_id, r)
-            if ex_info:
-                emb = ex_info.get("embedded_answers") or {}
-                if len(emb) >= 15:
-                    new_keys.append([doc_id, max(int(k) for k in emb.keys()), json.dumps(ex_info.get("sections", [])), json.dumps(emb), doc_id, now_str])
-                    existing_key_ids.add(doc_id)
-                    embedded_keys_parsed += 1
-
-    for ans_id, (ans_idx, ans_r) in by_id.items():
-        if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
-            continue
-        ans_info = await get_ans_analysis(ans_id, ans_r)
-        if not ans_info or ans_info.get("is_scanned") or ans_info.get("looks_like_question_paper"):
-            continue
-
-        best_match = None
-        for ex_id, (ex_idx, ex_r) in by_id.items():
-            if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
-                continue
-            if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):
-                continue
-            ex_info = await get_exam_analysis(ex_id, ex_r)
-            if not ex_info:
-                continue
-            res = score_exam_answer_match(ex_info, ans_info, same_round_hint=(ex_r[8] == ans_r[8]))
-            if res["status"] == "AUTO_VERIFIED":
-                if not best_match or res["score"] > best_match[0]:
-                    best_match = (res["score"], ex_id, ex_idx, res)
-
-        if best_match:
-            _, ex_id, ex_idx, res = best_match
-            by_id[ex_id][1][10] = ans_id
-            ans_r[10] = ex_id
-            newly_discovered += 1
-            pdf_updates.extend([
-                {"range": f"K{ex_idx}", "values": [[ans_id]]}, {"range": f"K{ans_idx}", "values": [[ex_id]]},
-                {"range": f"U{ex_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_idx}", "values": [["AUTO_VERIFIED"]]},
-            ])
-            if res["answers"] and ex_id not in existing_key_ids:
-                new_keys.append([ex_id, res["total_q"], json.dumps(res["sections"]), json.dumps(res["answers"]), ans_id, now_str])
-                existing_key_ids.add(ex_id)
-
-    def _save_results():
-        if pdf_updates:
-            for i in range(0, len(pdf_updates), 200):
-                pdf_sheet.batch_update(pdf_updates[i : i + 200])
-        if new_keys:
-            keys_sheet.append_rows(new_keys, value_input_option="USER_ENTERED")
-
-    await asyncio.to_thread(_save_results)
-    webapp_router.invalidate_library_cache()
-
-    await status_msg.edit_text(
-        f"✅ <b>PDF Content Verification Complete!</b>\n\n"
-        f"✔️ <b>Auto-Verified:</b> {verified_count} (+{newly_discovered} newly matched by content!)\n"
-        f"❌ <b>False Links Removed:</b> {rejected_count}\n"
-        f"🧐 <b>Needs Review:</b> {review_count} | 🎯 <b>Quiz Keys Parsed:</b> {len(new_keys)} ({embedded_keys_parsed} embedded)\n"
-        f"{'Send /review_links to confirm scanned pairs.' if review_count else ''}",
-        parse_mode="HTML",
-    )
+    _BG_JOBS["verify"] = True
+    force = bool(context.args and context.args[0].lower() == "force")
+    status_msg = await update.message.reply_text("Starting background PDF verification (batch of 40 PDFs, checkpointing as it goes)...")
+    asyncio.create_task(_run_verify_links_bg(status_msg, force=force))
 
 
 async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1178,16 +1267,16 @@ async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     pairs = await asyncio.to_thread(_get_reviews)
     if not pairs:
-        await update.message.reply_text("✅ No pairs waiting for manual review!")
+        await update.message.reply_text("No pairs waiting for manual review.")
         return
 
     for ex_r, ans_r in pairs:
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirm Match", callback_data=f"link_ok:{ex_r[0]}:{ans_r[0]}"),
-            InlineKeyboardButton("❌ Unlink", callback_data=f"link_no:{ex_r[0]}:{ans_r[0]}"),
+            InlineKeyboardButton("Confirm Match", callback_data=f"link_ok:{ex_r[0]}:{ans_r[0]}"),
+            InlineKeyboardButton("Unlink", callback_data=f"link_no:{ex_r[0]}:{ans_r[0]}"),
         ]])
         await update.message.reply_text(
-            f"🧐 <b>Verify Link</b>\n📄 <b>Exam ({ex_r[0]}):</b> {html.escape(ex_r[1])}\n🔑 <b>Answer ({ans_r[0]}):</b> {html.escape(ans_r[1])}",
+            f"<b>Verify Link</b>\n<b>Exam ({ex_r[0]}):</b> {html.escape(ex_r[1])}\n<b>Answer ({ans_r[0]}):</b> {html.escape(ans_r[1])}",
             reply_markup=kb, parse_mode="HTML",
         )
 
@@ -1214,7 +1303,7 @@ async def link_review_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await asyncio.to_thread(_apply)
     webapp_router.invalidate_library_cache()
-    await query.edit_message_text(f"{'✅ Link confirmed!' if action == 'link_ok' else '❌ Link removed.'} ({ex_id} ↔ {ans_id})")
+    await query.edit_message_text(f"{'Link confirmed.' if action == 'link_ok' else 'Link removed.'} ({ex_id} / {ans_id})")
 
 
 async def convert_office_via_apps_script(drive_file_id: str) -> str | None:
@@ -1285,109 +1374,121 @@ def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
     return results
 
 
+async def _run_sync_drive_bg(status_msg):
+    try:
+        def _prepare_sync():
+            _, pdf_sheet = get_sheets()
+            return pdf_sheet, pdf_sheet.get_all_values(), list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID)
+
+        pdf_sheet, existing_rows, drive_files = await asyncio.to_thread(_prepare_sync)
+
+        existing_drive_ids, existing_unique_keys, stem_to_row_idx = set(), set(), {}
+        for idx, row in enumerate(existing_rows[1:], start=2):
+            if len(row) >= 16 and row[15]:
+                existing_drive_ids.add(row[15])
+            if len(row) >= 17 and row[16]:
+                existing_drive_ids.add(row[16])
+            if len(row) >= 19 and row[18]:
+                existing_unique_keys.add(row[18])
+            if len(row) >= 2:
+                stem_to_row_idx[normalize_stem(row[1])] = idx
+
+        grouped_files, seen_md5 = {}, set(existing_unique_keys)
+        skipped_excluded = skipped_duplicates = 0
+
+        for f in drive_files:
+            fname = f["name"]
+            excluded, _ = is_excluded_file(fname)
+            if excluded:
+                skipped_excluded += 1
+                continue
+            f_id, md5 = f["id"], f.get("md5Checksum") or f["id"]
+            if f_id in existing_drive_ids or md5 in seen_md5:
+                skipped_duplicates += 1
+                continue
+            seen_md5.add(md5)
+            stem = normalize_stem(fname)
+            ext = fname.rsplit(".", 1)[-1].lower()
+            grouped_files.setdefault(stem, {})
+            if ext not in grouped_files[stem]:
+                grouped_files[stem][ext] = f
+
+        converted_count = 0
+        if CONVERTER_SCRIPT_URL:
+            for stem, ext_map in grouped_files.items():
+                if "pdf" not in ext_map and ("pptx" in ext_map or "docx" in ext_map):
+                    office_file = ext_map.get("pptx") or ext_map.get("docx")
+                    new_pdf_id = await convert_office_via_apps_script(office_file["id"])
+                    if new_pdf_id:
+                        ext_map["pdf"] = {"id": new_pdf_id, "name": office_file["name"].rsplit(".", 1)[0] + ".pdf", "size": office_file.get("size", "0"), "md5Checksum": new_pdf_id}
+                        converted_count += 1
+
+        next_num, new_rows, twin_updates = len(existing_rows), [], []
+        for stem, ext_map in sorted(grouped_files.items()):
+            pdf_file, office_file = ext_map.get("pdf"), ext_map.get("pptx") or ext_map.get("docx")
+            if stem in stem_to_row_idx and office_file and not pdf_file:
+                twin_updates.append({"range": f"Q{stem_to_row_idx[stem]}", "values": [[office_file["id"]]]})
+                continue
+            primary = pdf_file or office_file
+            if not primary:
+                continue
+            meta = classify_material(primary["name"])
+            doc_id = f"DOC-{next_num:04d}"
+            next_num += 1
+            formats = [fmt for fmt, cond in [("PDF", pdf_file), ("PPTX", "pptx" in ext_map), ("DOCX", "docx" in ext_map)] if cond]
+            size_mb = round(int(primary.get("size") or 0) / (1024 * 1024), 2)
+            new_rows.append([
+                doc_id, primary["name"], meta["grade"], meta["stream"], meta["subject"],
+                meta["category"], meta["year"], meta["exam_tag"], meta["round_or_code"],
+                meta["link_key"], "", meta["has_embedded_answer"], " + ".join(formats),
+                size_mb, "Drive", pdf_file["id"] if pdf_file else "",
+                office_file["id"] if office_file else "", "", primary.get("md5Checksum") or primary["id"], "", "", "",
+            ])
+
+        def _write_and_link():
+            if twin_updates:
+                pdf_sheet.batch_update(twin_updates)
+            if new_rows:
+                for i in range(0, len(new_rows), 250):
+                    pdf_sheet.append_rows(new_rows[i : i + 250], value_input_option="USER_ENTERED")
+            link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
+            if link_updates:
+                pdf_sheet.batch_update(link_updates)
+            return len(link_updates) // 2
+
+        paired_count = await asyncio.to_thread(_write_and_link)
+        webapp_router.invalidate_library_cache()
+
+        await status_msg.edit_text(
+            f"<b>Google Drive Sync Complete</b>\n\n"
+            f"<b>Added:</b> {len(new_rows)} | <b>Converted:</b> {converted_count}\n"
+            f"<b>Candidate Pairs:</b> {paired_count} | <b>Duplicates:</b> {skipped_duplicates} | <b>Excluded:</b> {skipped_excluded}\n\n"
+            f"Run /verify_links next to verify PDF pairs &amp; parse Quiz keys.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Background sync_drive failed")
+        try:
+            await status_msg.edit_text(f"Drive sync failed: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _BG_JOBS["sync"] = False
+
+
 async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         return
     if not DRIVE_FOLDER_ID:
-        await update.message.reply_text("⚠️ <code>DRIVE_FOLDER_ID</code> is not set.", parse_mode="HTML")
+        await update.message.reply_text("<code>DRIVE_FOLDER_ID</code> is not set.", parse_mode="HTML")
+        return
+    if _BG_JOBS["sync"]:
+        await update.message.reply_text("Drive sync is already running in the background.")
         return
 
-    status_msg = await update.message.reply_text("🔄 Scanning Google Drive folder and classifying files...")
-
-    def _prepare_sync():
-        _, pdf_sheet = get_sheets()
-        return pdf_sheet, pdf_sheet.get_all_values(), list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID)
-
-    try:
-        pdf_sheet, existing_rows, drive_files = await asyncio.to_thread(_prepare_sync)
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Drive sync failed: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
-        return
-
-    existing_drive_ids, existing_unique_keys, stem_to_row_idx = set(), set(), {}
-    for idx, row in enumerate(existing_rows[1:], start=2):
-        if len(row) >= 16 and row[15]:
-            existing_drive_ids.add(row[15])
-        if len(row) >= 17 and row[16]:
-            existing_drive_ids.add(row[16])
-        if len(row) >= 19 and row[18]:
-            existing_unique_keys.add(row[18])
-        if len(row) >= 2:
-            stem_to_row_idx[normalize_stem(row[1])] = idx
-
-    grouped_files, seen_md5 = {}, set(existing_unique_keys)
-    skipped_excluded = skipped_duplicates = 0
-
-    for f in drive_files:
-        fname = f["name"]
-        excluded, _ = is_excluded_file(fname)
-        if excluded:
-            skipped_excluded += 1
-            continue
-        f_id, md5 = f["id"], f.get("md5Checksum") or f["id"]
-        if f_id in existing_drive_ids or md5 in seen_md5:
-            skipped_duplicates += 1
-            continue
-        seen_md5.add(md5)
-        stem = normalize_stem(fname)
-        ext = fname.rsplit(".", 1)[-1].lower()
-        grouped_files.setdefault(stem, {})
-        if ext not in grouped_files[stem]:
-            grouped_files[stem][ext] = f
-
-    converted_count = 0
-    if CONVERTER_SCRIPT_URL:
-        for stem, ext_map in grouped_files.items():
-            if "pdf" not in ext_map and ("pptx" in ext_map or "docx" in ext_map):
-                office_file = ext_map.get("pptx") or ext_map.get("docx")
-                new_pdf_id = await convert_office_via_apps_script(office_file["id"])
-                if new_pdf_id:
-                    ext_map["pdf"] = {"id": new_pdf_id, "name": office_file["name"].rsplit(".", 1)[0] + ".pdf", "size": office_file.get("size", "0"), "md5Checksum": new_pdf_id}
-                    converted_count += 1
-
-    next_num, new_rows, twin_updates = len(existing_rows), [], []
-    for stem, ext_map in sorted(grouped_files.items()):
-        pdf_file, office_file = ext_map.get("pdf"), ext_map.get("pptx") or ext_map.get("docx")
-        if stem in stem_to_row_idx and office_file and not pdf_file:
-            twin_updates.append({"range": f"Q{stem_to_row_idx[stem]}", "values": [[office_file["id"]]]})
-            continue
-        primary = pdf_file or office_file
-        if not primary:
-            continue
-        meta = classify_material(primary["name"])
-        doc_id = f"DOC-{next_num:04d}"
-        next_num += 1
-        formats = [fmt for fmt, cond in [("PDF", pdf_file), ("PPTX", "pptx" in ext_map), ("DOCX", "docx" in ext_map)] if cond]
-        size_mb = round(int(primary.get("size") or 0) / (1024 * 1024), 2)
-        new_rows.append([
-            doc_id, primary["name"], meta["grade"], meta["stream"], meta["subject"],
-            meta["category"], meta["year"], meta["exam_tag"], meta["round_or_code"],
-            meta["link_key"], "", meta["has_embedded_answer"], " + ".join(formats),
-            size_mb, "Drive", pdf_file["id"] if pdf_file else "",
-            office_file["id"] if office_file else "", "", primary.get("md5Checksum") or primary["id"], "", "", "",
-        ])
-
-    def _write_and_link():
-        if twin_updates:
-            pdf_sheet.batch_update(twin_updates)
-        if new_rows:
-            for i in range(0, len(new_rows), 250):
-                pdf_sheet.append_rows(new_rows[i : i + 250], value_input_option="USER_ENTERED")
-        link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
-        if link_updates:
-            pdf_sheet.batch_update(link_updates)
-        return len(link_updates) // 2
-
-    paired_count = await asyncio.to_thread(_write_and_link)
-    webapp_router.invalidate_library_cache()
-
-    await status_msg.edit_text(
-        f"✅ <b>Google Drive Sync Complete!</b>\n\n"
-        f"📥 <b>Added:</b> {len(new_rows)} | 📄 <b>Converted:</b> {converted_count}\n"
-        f"🔗 <b>Candidate Pairs:</b> {paired_count} | ♻️ <b>Duplicates:</b> {skipped_duplicates} | 🚫 <b>Excluded:</b> {skipped_excluded}\n\n"
-        f"👉 Run /verify_links next to verify PDF pairs &amp; parse Quiz keys!",
-        parse_mode="HTML",
-    )
+    _BG_JOBS["sync"] = True
+    status_msg = await update.message.reply_text("Scanning Google Drive folder in the background...")
+    asyncio.create_task(_run_sync_drive_bg(status_msg))
 
 
 async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1424,6 +1525,10 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await asyncio.to_thread(_append_and_link)
     webapp_router.invalidate_library_cache()
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.warning(f"Telegram handler exception: {context.error}")
 
 
 # ==============================================================================
@@ -1465,6 +1570,7 @@ ptb_app.add_handler(CallbackQueryHandler(broadcast_callback, pattern=r"^(bc_send
 ptb_app.add_handler(CallbackQueryHandler(link_review_callback, pattern=r"^(link_ok:|link_no:)"))
 ptb_app.add_handler(CallbackQueryHandler(launch_callback, pattern=r"^(launch_confirm:|launch_cancel)"))
 ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.ALL, auto_categorize_file))
+ptb_app.add_error_handler(telegram_error_handler)
 
 
 @app.on_event("startup")
@@ -1481,7 +1587,7 @@ async def startup_event():
     if WEBAPP_URL:
         try:
             await ptb_app.bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(text="🚀 Open Qelal", web_app=WebAppInfo(url=WEBAPP_URL))
+                menu_button=MenuButtonWebApp(text="Open Qelal", web_app=WebAppInfo(url=WEBAPP_URL))
             )
         except Exception as e:
             logger.warning(f"Menu button error: {e}")
