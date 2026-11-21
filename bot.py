@@ -1,1367 +1,1703 @@
 import os
-import re
-import hmac
 import json
-import time
-import uuid
-import hashlib
-import tempfile
-import asyncio
 import html
+import uuid
+import asyncio
 import logging
-from datetime import datetime, timedelta
-from urllib.parse import parse_qsl, quote
+import threading
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
+from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse, JSONResponse
-from starlette.background import BackgroundTask
+import gspread
+from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from googleapiclient.discovery import build
+from fastapi import FastAPI, Request, Response
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+    MenuButtonWebApp,
+)
+from telegram.ext import (
+    Application,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
 
-from study_plans import STUDY_PLAN_TEMPLATES
+from classifier import classify_material, is_excluded_file, normalize_stem
+from link_verifier import (
+    analyze_exam_pdf,
+    analyze_answer_pdf,
+    score_exam_answer_match,
+)
 from receipt_generator import generate_membership_pdf
+from webapp_api import create_webapp_router, normalize_username
 
+# --- CONFIGURATION ---
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "2087550317"))
+SHEET_NAME = os.getenv("SHEET_NAME", "Bishoftu Tutoring Hub DB")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "").strip()
+CONVERTER_SCRIPT_URL = os.getenv("CONVERTER_SCRIPT_URL", "").strip()
+CONVERTER_SECRET = os.getenv("CONVERTER_SECRET", "").strip()
+
+BASE_URL = (os.getenv("WEBAPP_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+WEBAPP_URL = f"{BASE_URL}/webapp" if BASE_URL else ""
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")
+
+EAT_TZ = timezone(timedelta(hours=3))
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+REG_HEADERS = [
+    "ID", "Name", "Grade", "Phone", "Status", "Timestamp", "Telegram_ID",
+    "Approved_At", "Expires_On", "Months_Paid", "Last_Alert_Day", "Stream",
+    "Referral_Code", "Referred_By", "Referral_Count", "Role", "Format", "Lang", "Username",
+]
+STUDENTS_HEADERS = [
+    "Student_ID", "Student_Name", "Grade", "Stream", "Format",
+    "Parent_TG_ID", "Child_TG_ID", "Child_Contact", "Link_Token", "Sibling_Discount", "Created_At",
+]
+REPORTS_HEADERS = [
+    "Report_ID", "Student_ID", "Period", "Attendance", "Scores_Text",
+    "Improved_Note", "Focus_Note", "Approval_Status", "Published_At", "Tutor_Name",
+]
+PDF_HEADERS = [
+    "Doc_ID", "File_Name", "Grade", "Stream", "Subject", "Category",
+    "Year", "Exam_Tag", "Round_Or_Code", "Link_Key", "Linked_Doc_ID",
+    "Has_Embedded_Answer", "Format", "File_Size_MB", "Source",
+    "Drive_PDF_ID", "Drive_Original_ID", "Telegram_File_ID",
+    "Unique_Key", "Post_Link", "Link_Status", "Is_Trial",
+]
+KEY_HEADERS = ["Doc_ID", "Total_Q", "Sections_JSON", "Answers_JSON", "Answer_Source_Doc_ID", "Updated_At"]
+ANALYTICS_HEADERS = ["Timestamp", "Telegram_ID", "Student_Name", "Grade", "Action", "Doc_ID", "File_Name", "Subject", "Score"]
+CONFIG_HEADERS = ["Key", "Value"]
+PROGRESS_HEADERS = ["Telegram_ID", "Bookmarks_JSON", "Last_Read_JSON", "Plan_Progress_JSON", "Custom_Plan_JSON", "Updated_At"]
+
+DEFAULT_CONFIG = {
+    "LAUNCH_MODE": "OPEN_LAUNCH",
+    "MATRIC_DATE": "2027-06-25",
+    "GRADE8_MINISTRY_DATE": "2027-06-15",
+    "GRADE6_MINISTRY_DATE": "2027-06-10",
+    "SEMESTER_DATE": "2027-01-25",
+}
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+PENDING_BROADCASTS = {}
+billing_task = None
+_BG_JOBS = {"verify": False, "sync": False}
 
-def normalize_phone(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw or "")
-    if digits.startswith("251") and len(digits) >= 12:
-        digits = digits[3:]
-    elif digits.startswith("0") and len(digits) >= 10:
-        digits = digits[1:]
-    return digits[-9:] if len(digits) >= 9 else ""
-
-
-def normalize_username(raw: str) -> str:
-    u = (raw or "").strip().lstrip("@").lower()
-    return u if re.fullmatch(r"[a-z0-9_]{3,}", u) else ""
+_SHEETS_LOCK = threading.Lock()
+_SHEETS_READY = False
+_CACHED_SHEET_ID = None
 
 
-def create_webapp_router(
-    bot_token: str,
-    admin_user_id: int,
-    get_ptb_app,
-    get_bot_username,
-    get_all_worksheets_fn,
-    get_credentials_fn,
-    eat_tz,
-):
-    router = APIRouter()
-    session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v6").encode()).digest()
-    boot_ver = str(int(time.time()))
-    no_cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+def get_credentials() -> Credentials:
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        return Credentials.from_service_account_info(json.loads(creds_json), scopes=SCOPES)
+    if os.path.exists("/etc/secrets/credentials.json"):
+        return Credentials.from_service_account_file("/etc/secrets/credentials.json", scopes=SCOPES)
+    return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
-    state = {
-        "creds": None,
-        "lib_cache": None,
-        "lib_cache_ts": 0.0,
-        "reg_cache": None,
-        "reg_cache_ts": 0.0,
-        "cfg_cache": None,
-        "cfg_cache_ts": 0.0,
-        "keys_cache": None,
-        "analytics_buffer": [],
-        "last_flush_ts": time.time(),
-    }
 
-    def invalidate_library_cache():
-        state["lib_cache"] = None
-        state["keys_cache"] = None
+def ensure_headers(sheet, expected_headers):
+    first_row = sheet.row_values(1)
+    if not first_row or len(first_row) < len(expected_headers):
+        sheet.update(values=[expected_headers], range_name="A1")
 
-    def invalidate_reg_cache():
-        state["reg_cache"] = None
 
-    def invalidate_config_cache():
-        state["cfg_cache"] = None
+def get_or_create_worksheet(sheet_doc, title: str, headers: list[str], defaults: dict | None = None):
+    created = False
+    try:
+        ws = sheet_doc.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = sheet_doc.add_worksheet(title=title, rows=1000, cols=max(26, len(headers)))
+        created = True
+    ensure_headers(ws, headers)
+    if created and defaults:
+        ws.append_rows([[k, v] for k, v in defaults.items()], value_input_option="USER_ENTERED")
+    return ws
 
-    router.invalidate_library_cache = invalidate_library_cache
-    router.invalidate_reg_cache = invalidate_reg_cache
-    router.invalidate_config_cache = invalidate_config_cache
 
-    def get_drive_access_token() -> str:
-        if state["creds"] is None:
-            state["creds"] = get_credentials_fn()
-        if not state["creds"].valid:
-            state["creds"].refresh(GoogleAuthRequest())
-        return state["creds"].token
-
-    # --- AUTH & SESSION TOKENS ---
-    def verify_telegram_init_data(init_data: str) -> dict | None:
-        if not init_data:
-            return None
+def _get_spreadsheet(client):
+    global _CACHED_SHEET_ID
+    if _CACHED_SHEET_ID:
         try:
-            parsed = dict(parse_qsl(init_data, keep_blank_values=True))
-            received_hash = parsed.pop("hash", None)
-            if not received_hash:
-                return None
-            data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-            secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-            expected_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected_hash, received_hash):
-                return None
-            if time.time() - int(parsed.get("auth_date", "0")) > 86400:
-                return None
-            return json.loads(parsed.get("user", "{}"))
+            return client.open_by_key(_CACHED_SHEET_ID)
         except Exception:
-            return None
+            _CACHED_SHEET_ID = None
+    doc = client.open(SHEET_NAME)
+    _CACHED_SHEET_ID = doc.id
+    return doc
 
-    def create_session_token(tg_id: int) -> str:
-        exp = int(time.time()) + 14400
-        payload = f"{tg_id}:{exp}"
-        sig = hmac.new(session_secret, payload.encode(), hashlib.sha256).hexdigest()
-        return f"{payload}:{sig}"
 
-    def verify_session_token(token: str) -> int | None:
-        try:
-            tg_id_str, exp_str, sig = token.split(":", 2)
-            if int(exp_str) < int(time.time()):
-                return None
-            expected = hmac.new(session_secret, f"{tg_id_str}:{exp_str}".encode(), hashlib.sha256).hexdigest()
-            return int(tg_id_str) if hmac.compare_digest(expected, sig) else None
-        except Exception:
-            return None
-
-    # --- CACHED LOADERS ---
-    def _load_config_sync() -> dict:
-        _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
-        rows = cfg_sheet.get_all_values()[1:]
-        cfg = {
-            "LAUNCH_MODE": "OPEN_LAUNCH",
-            "MATRIC_DATE": "2027-06-25",
-            "GRADE8_MINISTRY_DATE": "2027-06-15",
-            "GRADE6_MINISTRY_DATE": "2027-06-10",
-            "SEMESTER_DATE": "2027-01-25",
-        }
-        for r in rows:
-            if len(r) >= 2 and r[0].strip():
-                cfg[r[0].strip()] = r[1].strip()
-        return cfg
-
-    async def get_config() -> dict:
-        now = time.time()
-        if state["cfg_cache"] is None or (now - state["cfg_cache_ts"] > 60):
-            state["cfg_cache"] = await asyncio.to_thread(_load_config_sync)
-            state["cfg_cache_ts"] = now
-        return state["cfg_cache"]
-
-    def _load_reg_and_students_sync():
-        reg_sheet, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets_fn()
-        reg_rows = reg_sheet.get_all_values()[1:]
-        stu_rows = students_sheet.get_all_values()[1:]
-        rpt_rows = reports_sheet.get_all_values()[1:]
-
-        by_tg = {}
-        all_regs = []
-        for idx, row in enumerate(reg_rows, start=2):
-            r = row + [""] * (19 - len(row))
-            if r[6].strip():
-                ref_code = r[12].strip()
-                if not ref_code:
-                    ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-                    try:
-                        reg_sheet.update_cell(idx, 13, ref_code)
-                    except Exception:
-                        pass
-                rec = {
-                    "row_idx": idx,
-                    "id": r[0],
-                    "name": r[1] or "Student",
-                    "grade": r[2],
-                    "phone": r[3],
-                    "status": r[4].strip().upper() or "NEW",
-                    "timestamp": r[5],
-                    "tg_id": r[6].strip(),
-                    "approved_at": r[7],
-                    "expires_on": r[8],
-                    "months_paid": int(r[9]) if r[9].isdigit() else 0,
-                    "stream": r[11] or "General",
-                    "referral_code": ref_code,
-                    "referred_by": r[13],
-                    "referral_count": int(r[14]) if r[14].isdigit() else 0,
-                    "role": r[15] or "student",
-                    "format": r[16] or "Weekend Hub",
-                    "lang": r[17] if r[17] in ("en", "am", "om") else "en",
-                    "username": normalize_username(r[18]),
-                }
-                by_tg[r[6].strip()] = rec
-                all_regs.append(rec)
-
-        children_by_parent = {}
-        child_by_tg = {}
-        student_by_id = {}
-        all_students = []
-        for idx, row in enumerate(stu_rows, start=2):
-            s = row + [""] * (11 - len(row))
-            if not s[0]:
-                continue
-            stu_obj = {
-                "row_idx": idx,
-                "student_id": s[0],
-                "student_name": s[1],
-                "grade": s[2],
-                "stream": s[3] or "General",
-                "format": s[4] or "Weekend Hub",
-                "parent_tg_id": s[5].strip(),
-                "child_tg_id": s[6].strip(),
-                "child_contact": s[7],
-                "link_token": s[8],
-                "sibling_discount": s[9] == "YES",
-            }
-            student_by_id[s[0]] = stu_obj
-            all_students.append(stu_obj)
-            if s[5].strip():
-                children_by_parent.setdefault(s[5].strip(), []).append(stu_obj)
-            if s[6].strip():
-                child_by_tg[s[6].strip()] = stu_obj
-
-        approved_reports_by_stu = {}
-        for row in rpt_rows:
-            rp = row + [""] * (10 - len(row))
-            if rp[7].strip().lower() == "approved" and rp[1]:
-                approved_reports_by_stu.setdefault(rp[1], []).append({
-                    "report_id": rp[0],
-                    "student_id": rp[1],
-                    "student_name": student_by_id.get(rp[1], {}).get("student_name", ""),
-                    "grade": student_by_id.get(rp[1], {}).get("grade", ""),
-                    "period": rp[2],
-                    "attendance": rp[3],
-                    "scores_text": rp[4],
-                    "improved_note": rp[5],
-                    "focus_note": rp[6],
-                    "published_at": rp[8],
-                    "tutor_name": rp[9],
-                })
-
-        return {
-            "by_tg": by_tg,
-            "all_regs": all_regs,
-            "all_students": all_students,
-            "children_by_parent": children_by_parent,
-            "child_by_tg": child_by_tg,
-            "student_by_id": student_by_id,
-            "reports_by_stu": approved_reports_by_stu,
-        }
-
-    async def get_reg_bundle() -> dict:
-        now = time.time()
-        if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 30):
-            state["reg_cache"] = await asyncio.to_thread(_load_reg_and_students_sync)
-            state["reg_cache_ts"] = now
-        return state["reg_cache"]
-
-    async def get_user_access(tg_id: int) -> dict:
-        bundle = await get_reg_bundle()
-        cfg = await get_config()
-        launch_mode = cfg.get("LAUNCH_MODE", "OPEN_LAUNCH")
-
-        rec = bundle["by_tg"].get(str(tg_id))
-        linked_child = bundle["child_by_tg"].get(str(tg_id))
-        children = bundle["children_by_parent"].get(str(tg_id), [])
-
-        if tg_id == admin_user_id and not rec:
-            return {
-                "registered": True, "status": "APPROVED", "tier": "FULL", "launch_mode": launch_mode,
-                "role": "admin", "name": "Admin", "grade": "Grade 12", "stream": "Natural",
-                "phone": "", "expires_on": "", "referral_code": "QELAL-ADMIN", "referral_count": 0,
-                "lang": "en", "children": [], "reports": [], "sibling_discount": False, "is_admin": True,
-            }
-
-        if not rec and not linked_child:
-            return {
-                "registered": False, "status": "NOT_REGISTERED", "tier": "NONE",
-                "launch_mode": launch_mode, "is_admin": False,
-            }
-
-        effective_status = rec["status"] if rec else "NEW"
-        effective_expires = rec["expires_on"] if rec else ""
-        if linked_child and linked_child["parent_tg_id"]:
-            parent_rec = bundle["by_tg"].get(linked_child["parent_tg_id"])
-            if parent_rec:
-                effective_status = parent_rec["status"]
-                effective_expires = parent_rec["expires_on"]
-
-        if tg_id == admin_user_id:
-            effective_status = "APPROVED"
-
-        is_full = (tg_id == admin_user_id) or (launch_mode == "OPEN_LAUNCH") or (effective_status in ("APPROVED", "EXPIRED"))
-        role = rec["role"] if rec else "student"
-
-        reports = []
-        if role == "parent":
-            for ch in children:
-                reports.extend(bundle["reports_by_stu"].get(ch["student_id"], []))
-        elif linked_child:
-            reports.extend(bundle["reports_by_stu"].get(linked_child["student_id"], []))
-
-        bot_user = get_bot_username()
-        enriched_children = []
-        for ch in children:
-            inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
-            enriched_children.append({**ch, "invite_url": inv, "is_linked": bool(ch["child_tg_id"])})
-
-        primary_grade = linked_child["grade"] if linked_child else (children[0]["grade"] if children else (rec["grade"] if rec else "Grade 12"))
-        primary_stream = linked_child["stream"] if linked_child else (children[0]["stream"] if children else (rec["stream"] if rec else "General"))
-
-        return {
-            "registered": True,
-            "status": effective_status,
-            "tier": "FULL" if is_full else "TRIAL",
-            "launch_mode": launch_mode,
-            "role": role,
-            "name": rec["name"] if rec else linked_child["student_name"],
-            "grade": primary_grade,
-            "stream": primary_stream,
-            "phone": rec["phone"] if rec else "",
-            "expires_on": effective_expires,
-            "referral_code": rec["referral_code"] if rec else "",
-            "referral_count": rec["referral_count"] if rec else 0,
-            "lang": rec["lang"] if rec else "en",
-            "children": enriched_children,
-            "sibling_discount": any(c["sibling_discount"] for c in children),
-            "reports": reports,
-            "is_admin": tg_id == admin_user_id,
-        }
-
-    def compute_countdown(grade: str, cfg: dict) -> dict:
-        if grade == "Grade 12":
-            return {"date": cfg.get("MATRIC_DATE", "2027-06-25"), "type": "matric_12"}
-        if grade == "Grade 8":
-            return {"date": cfg.get("GRADE8_MINISTRY_DATE", "2027-06-15"), "type": "ministry_8"}
-        if grade == "Grade 6":
-            return {"date": cfg.get("GRADE6_MINISTRY_DATE", "2027-06-10"), "type": "ministry_6"}
-        return {"date": cfg.get("SEMESTER_DATE", "2027-01-25"), "type": "semester"}
-
-    def _load_library_and_keys_sync():
-        _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets_fn()
-        pdf_rows = pdf_sheet.get_all_values()[1:]
-        key_rows = keys_sheet.get_all_values()[1:]
-
-        keys_by_id = {}
-        for kr in key_rows:
-            k = kr + [""] * (6 - len(kr))
-            if k[0]:
-                try:
-                    keys_by_id[k[0]] = {
-                        "total_q": int(k[1]) if k[1].isdigit() else 0,
-                        "sections": json.loads(k[2]) if k[2] else [],
-                        "answers": json.loads(k[3]) if k[3] else {},
-                    }
-                except Exception:
-                    pass
-
-        items, by_id = [], {}
-        for idx, row in enumerate(pdf_rows, start=2):
-            if not row or not row[0]:
-                continue
-            r = row + [""] * (22 - len(row))
-            item = {
-                "row_idx": idx, "doc_id": r[0], "file_name": r[1], "grade": r[2],
-                "stream": r[3], "subject": r[4], "category": r[5], "year": r[6],
-                "exam_tag": r[7], "round_or_code": r[8], "link_key": r[9],
-                "linked_doc_id": r[10], "has_embedded_answer": r[11], "format": r[12],
-                "file_size_mb": float(r[13]) if r[13] else 0.0, "source": r[14],
-                "drive_pdf_id": r[15], "drive_original_id": r[16], "telegram_file_id": r[17],
-                "post_link": r[19], "link_status": r[20],
-                "is_trial": r[21].strip().upper() == "YES",
-                "has_quiz": r[0] in keys_by_id,
-                "quiz_total_q": keys_by_id[r[0]]["total_q"] if r[0] in keys_by_id else 0,
-            }
-            items.append(item)
-            by_id[item["doc_id"]] = item
-        return items, by_id, keys_by_id
-
-    async def get_library_and_keys():
-        now = time.time()
-        if state["lib_cache"] is None or (now - state["lib_cache_ts"] > 300):
-            items, by_id, keys_by_id = await asyncio.to_thread(_load_library_and_keys_sync)
-            state["lib_cache"] = (items, by_id)
-            state["keys_cache"] = keys_by_id
-            state["lib_cache_ts"] = now
-        return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
-
-    def get_trial_doc_ids(items: list[dict], grade: str, stream: str) -> set[str]:
-        grade_matches = [
-            it for it in items
-            if it["category"] != "Answer Sheet"
-            and (it["drive_pdf_id"] or it["telegram_file_id"])
-            and (
-                it["grade"] == grade
-                or (grade in ("Grade 9", "Grade 10", "Grade 11", "Grade 12")
-                    and it["grade"] in ("Grade 9-12", "Grade 11-12", "Grade 9-10"))
-            )
-        ]
-        if stream in ("Natural", "Social"):
-            sf = [it for it in grade_matches if it["stream"] in (stream, "General")]
-            if len(sf) >= 3:
-                grade_matches = sf
-
-        explicit = [it["doc_id"] for it in grade_matches if it["is_trial"]]
-        if len(explicit) >= 3:
-            return set(explicit[:3])
-
-        picked = list(explicit)
-        for cat in ("Textbook", "Short Note / Lesson", "Entrance Exam", "Model Exam", "Supplementary Book", "Study Plan / Schedule"):
-            for it in grade_matches:
-                if it["doc_id"] not in picked and it["category"] == cat:
-                    picked.append(it["doc_id"])
-                    break
-            if len(picked) >= 3:
-                break
-
-        for it in items:
-            if len(picked) >= 3:
-                break
-            if it["doc_id"] not in picked and it["category"] != "Answer Sheet":
-                picked.append(it["doc_id"])
-        return set(picked[:3])
-
-    async def require_session(request: Request, token: str | None = None) -> tuple[int, dict]:
-        auth_token = token
-        if not auth_token:
-            hdr = request.headers.get("authorization", "")
-            if hdr.lower().startswith("bearer "):
-                auth_token = hdr[7:].strip()
-        if not auth_token:
-            raise HTTPException(status_code=401, detail="Missing token")
-        tg_id = verify_session_token(auth_token)
-        if not tg_id:
-            raise HTTPException(status_code=401, detail="Invalid or expired session")
-        access = await get_user_access(tg_id)
-        if not access["registered"] and not access["is_admin"]:
-            raise HTTPException(status_code=403, detail="Not registered")
-        return tg_id, access
-
-    async def require_admin(request: Request) -> tuple[int, dict]:
-        tg_id, access = await require_session(request)
-        if not access.get("is_admin"):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        return tg_id, access
-
-    def _flush_analytics_sync(rows: list[list[str]]):
-        _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
-        analytics_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    async def log_analytics(tg_id: int, access: dict, action: str, doc_id: str, file_name: str, subject: str, score: str = ""):
-        ts = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
-        state["analytics_buffer"].append([
-            ts, str(tg_id), access.get("name", ""), access.get("grade", ""),
-            action, doc_id, file_name, subject, score,
-        ])
-        if action == "QUIZ_SUBMIT" or len(state["analytics_buffer"]) >= 10 or (time.time() - state["last_flush_ts"] > 45):
-            batch = state["analytics_buffer"][:]
-            state["analytics_buffer"].clear()
-            state["last_flush_ts"] = time.time()
-            try:
-                await asyncio.to_thread(_flush_analytics_sync, batch)
-            except Exception as e:
-                logger.warning(f"Analytics flush error: {e}")
-
-    def content_disposition_header(disp_type: str, filename: str) -> str:
-        ascii_name = filename.encode("ascii", "ignore").decode("ascii").strip().replace('"', "") or "document.pdf"
-        return f'{disp_type}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(filename)}'
-
-    async def get_upstream_source(item: dict):
-        if item["drive_pdf_id"]:
-            token = await asyncio.to_thread(get_drive_access_token)
-            url = f"https://www.googleapis.com/drive/v3/files/{item['drive_pdf_id']}?alt=media&supportsAllDrives=true"
-            fname = item["file_name"] if item["file_name"].lower().endswith(".pdf") else item["file_name"].rsplit(".", 1)[0] + ".pdf"
-            return url, {"Authorization": f"Bearer {token}"}, fname, "application/pdf"
-        if item["drive_original_id"]:
-            token = await asyncio.to_thread(get_drive_access_token)
-            url = f"https://www.googleapis.com/drive/v3/files/{item['drive_original_id']}?alt=media&supportsAllDrives=true"
-            return url, {"Authorization": f"Bearer {token}"}, item["file_name"], "application/octet-stream"
-        if item["telegram_file_id"]:
-            tg_file = await get_ptb_app().bot.get_file(item["telegram_file_id"])
-            file_url = tg_file.file_path if tg_file.file_path.startswith("http") else f"https://api.telegram.org/file/bot{bot_token}/{tg_file.file_path}"
-            return file_url, {}, item["file_name"], "application/pdf"
-        raise HTTPException(status_code=404, detail="Source missing")
-
-    # ==========================================================================
-    # AUTO-LINKING HELPERS (PARENT <-> CHILD BY USERNAME OR PHONE)
-    # ==========================================================================
-    def _try_auto_link_child_on_auth_sync(tg_id: int, tg_username: str):
-        if not tg_username:
-            return None
-        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets_fn()
-        stu_rows = students_sheet.get_all_values()
-        matched_stu = None
-        for idx, row in enumerate(stu_rows[1:], start=2):
-            s = row + [""] * (11 - len(row))
-            if not s[6].strip() and normalize_username(s[7]) == tg_username and s[5].strip() != str(tg_id):
-                students_sheet.update_cell(idx, 7, str(tg_id))
-                matched_stu = s
-                break
-        if not matched_stu:
-            return None
-
-        parent_tg = matched_stu[5].strip()
-        reg_rows = reg_sheet.get_all_values()
-        parent_rec = None
-        already_reg = False
-        for rr in reg_rows[1:]:
-            rp = rr + [""] * (19 - len(rr))
-            if rp[6].strip() == parent_tg:
-                parent_rec = rp
-            if rp[6].strip() == str(tg_id):
-                already_reg = True
-
-        if not already_reg:
-            my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-            ts = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
-            p_status = parent_rec[4] if parent_rec else "NEW"
-            p_app = parent_rec[7] if parent_rec else ""
-            p_exp = parent_rec[8] if parent_rec else ""
-            p_lang = parent_rec[17] if parent_rec and parent_rec[17] in ("en", "am", "om") else "en"
-            reg_sheet.append_row([
-                max(1, len(reg_rows)), matched_stu[1], matched_stu[2], "", p_status, ts, str(tg_id),
-                p_app, p_exp, "0", "-1", matched_stu[3], my_code, "", "0", "student", matched_stu[4], p_lang, tg_username,
-            ])
-        return parent_tg, matched_stu[1], matched_stu[2]
-
-    def _sync_username_sync(tg_id: int, tg_username: str):
-        if not tg_username:
+def _ensure_all_tabs_once(sheet_doc):
+    global _SHEETS_READY
+    if _SHEETS_READY:
+        return
+    with _SHEETS_LOCK:
+        if _SHEETS_READY:
             return
-        reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
-        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
-            r = row + [""] * (19 - len(row))
-            if r[6].strip() == str(tg_id) and normalize_username(r[18]) != tg_username:
-                reg_sheet.update_cell(idx, 19, tg_username)
-                return
+        get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
+        get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Exam_Keys", KEY_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
+        get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
+        _SHEETS_READY = True
 
-    # ==========================================================================
-    # PUBLIC / STUDENT / PARENT ROUTES
-    # ==========================================================================
-    @router.get("/favicon.ico")
-    async def favicon():
-        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0F2342"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#FBBF24" font-size="34" font-weight="bold" font-family="sans-serif">ቀ</text></svg>'
-        return Response(content=svg, media_type="image/svg+xml")
 
-    @router.get("/webapp", response_class=HTMLResponse)
-    async def serve_webapp():
-        html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
-        if not os.path.exists(html_path):
-            return HTMLResponse("<h1>Missing static/index.html</h1>", status_code=500)
-        with open(html_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        content = content.replace('/static/styles.css"', f'/static/styles.css?v={boot_ver}"')
-        content = content.replace('/static/app.js"', f'/static/app.js?v={boot_ver}"')
-        return HTMLResponse(content, headers=no_cache_headers)
+def get_sheets():
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
 
-    @router.get("/static/{file_path:path}")
-    async def serve_static_asset(file_path: str):
-        static_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
-        full_path = os.path.abspath(os.path.join(static_dir, file_path))
-        if not full_path.startswith(static_dir) or not os.path.isfile(full_path):
-            raise HTTPException(status_code=404, detail="Asset not found")
-        return FileResponse(full_path, headers=no_cache_headers)
 
-    @router.post("/api/auth")
-    async def api_auth(request: Request):
-        try:
-            body = await request.json()
-            user = verify_telegram_init_data(body.get("initData", ""))
-            if not user:
-                return {"ok": False, "status": "OUTSIDE_TELEGRAM"}
+def get_all_worksheets():
+    global _SHEETS_READY
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    try:
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
+    except gspread.WorksheetNotFound:
+        _SHEETS_READY = False
+        _ensure_all_tabs_once(sheet_doc)
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
 
-            tg_id = int(user["id"])
-            tg_username = normalize_username(user.get("username", ""))
-            access = await get_user_access(tg_id)
 
-            if not access["registered"] and not access["is_admin"] and tg_username:
-                linked_info = await asyncio.to_thread(_try_auto_link_child_on_auth_sync, tg_id, tg_username)
-                if linked_info:
-                    invalidate_reg_cache()
-                    access = await get_user_access(tg_id)
-                    p_tg, c_name, c_grade = linked_info
-                    if p_tg:
-                        try:
-                            await get_ptb_app().bot.send_message(
-                                chat_id=int(p_tg),
-                                text=f"<b>Account Linked:</b> Your child <b>{html.escape(c_name)}</b> ({html.escape(c_grade)}) opened Qelal and was linked automatically.",
-                                parse_mode="HTML",
-                            )
-                        except Exception:
-                            pass
-            elif access["registered"] and tg_username:
-                bundle = await get_reg_bundle()
-                existing_rec = bundle["by_tg"].get(str(tg_id))
-                if existing_rec and existing_rec.get("username") != tg_username:
-                    await asyncio.to_thread(_sync_username_sync, tg_id, tg_username)
-                    invalidate_reg_cache()
+def get_config_dict(config_sheet=None) -> dict:
+    if config_sheet is None:
+        _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
+    rows = config_sheet.get_all_values()[1:]
+    cfg = dict(DEFAULT_CONFIG)
+    for r in rows:
+        if len(r) >= 2 and r[0].strip():
+            cfg[r[0].strip()] = r[1].strip()
+    return cfg
 
-            if not access["registered"] and not access["is_admin"]:
-                return {"ok": False, "status": "NOT_REGISTERED", "tg_first_name": user.get("first_name", "")}
 
-            cfg = await get_config()
-            token = create_session_token(tg_id)
-            days_left = None
-            if access.get("expires_on"):
-                try:
-                    exp = datetime.strptime(access["expires_on"], "%Y-%m-%d").date()
-                    days_left = (exp - datetime.now(eat_tz).date()).days
-                except ValueError:
-                    pass
+def set_config_value(key: str, value: str):
+    _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
+    rows = config_sheet.get_all_values()
+    for idx, r in enumerate(rows[1:], start=2):
+        if r and r[0].strip() == key:
+            config_sheet.update_cell(idx, 2, value)
+            return
+    config_sheet.append_row([key, value])
 
-            return {
-                "ok": True,
-                "status": access["status"],
-                "tier": access["tier"],
-                "launch_mode": access["launch_mode"],
-                "role": access["role"],
-                "name": access["name"],
-                "grade": access["grade"],
-                "stream": access["stream"],
-                "lang": access.get("lang", "en"),
-                "is_admin": access["is_admin"],
-                "days_left": days_left,
-                "referral_code": access.get("referral_code", ""),
-                "referral_count": access.get("referral_count", 0),
-                "sibling_discount": access.get("sibling_discount", False),
-                "children": access.get("children", []),
-                "reports": access.get("reports", []),
-                "countdown": compute_countdown(access["grade"], cfg),
-                "bot_username": get_bot_username(),
-                "token": token,
-            }
-        except Exception as e:
-            logger.exception("Auth failed")
-            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
 
-    @router.post("/api/register")
-    async def api_register(request: Request):
-        try:
-            body = await request.json()
-            user = verify_telegram_init_data(body.get("initData", ""))
-            if not user:
-                raise HTTPException(status_code=401, detail="Open inside Telegram to register")
+def get_drive_service():
+    return build("drive", "v3", credentials=get_credentials(), cache_discovery=False)
 
-            tg_id = int(user["id"])
-            tg_username = normalize_username(user.get("username", ""))
-            existing = await get_user_access(tg_id)
-            if existing["registered"]:
-                return {"ok": True, "already_registered": True}
 
-            role = "parent" if body.get("role") == "parent" else "student"
-            lang = body.get("lang") if body.get("lang") in ("en", "am", "om") else "en"
-            full_name = (body.get("full_name") or "").strip()
-            phone = (body.get("phone") or "").strip()
-            prog_format = (body.get("format") or "Weekend Hub").strip()
-            entered_ref = (body.get("referral_code") or "").strip().upper()
-            children = body.get("children") or []
+def webapp_keyboard(label: str, ref_code: str = ""):
+    if not WEBAPP_URL:
+        return None
+    target_url = f"{WEBAPP_URL}?ref={quote(ref_code)}" if ref_code else WEBAPP_URL
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(url=target_url))]])
 
-            if not full_name or not phone:
-                raise HTTPException(status_code=400, detail="Name and phone are required")
-            if not children:
-                raise HTTPException(status_code=400, detail="At least one student/grade is required")
 
-            my_ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-            timestamp = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
+def referral_invite_url(ref_code: str) -> str:
+    if BOT_USERNAME and ref_code:
+        return f"https://t.me/{BOT_USERNAME}?start=ref_{ref_code}"
+    return ""
 
-            def _write_registration():
-                reg_sheet, _, _, _, cfg_sheet, _, students_sheet, _ = get_all_worksheets_fn()
-                reg_rows = reg_sheet.get_all_values()
-                stu_rows = students_sheet.get_all_values()
 
-                valid_ref_code, referrer_name = "", ""
-                if entered_ref:
+# ==============================================================================
+# 1. TRILINGUAL /START LAUNCHER, CHILD LINKING & REFERRAL COMMAND
+# ==============================================================================
+def find_registration_by_tg_id(reg_sheet, tg_id: int):
+    for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+        r = row + [""] * (19 - len(row))
+        if str(r[6]).strip() == str(tg_id):
+            return idx, r
+    return None
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    tg_username = normalize_username(update.effective_user.username or "")
+    arg = context.args[0].strip() if context.args else ""
+
+    if arg.startswith("child_"):
+        def _link_child():
+            reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
+            reg_rows = reg_sheet.get_all_values()
+            for idx, row in enumerate(students_sheet.get_all_values()[1:], start=2):
+                s = row + [""] * (11 - len(row))
+                if s[8].strip() == arg:
+                    students_sheet.update_cell(idx, 7, str(user_id))
+                    parent_tg = s[5].strip()
+                    p_status, p_app, p_exp, p_lang = "APPROVED", "", "", "en"
                     for rr in reg_rows[1:]:
                         rp = rr + [""] * (19 - len(rr))
-                        if rp[12].strip().upper() == entered_ref and rp[6].strip() != str(tg_id):
-                            valid_ref_code = entered_ref
-                            referrer_name = rp[1]
+                        if rp[6].strip() == parent_tg:
+                            p_status = rp[4].strip().upper() or "NEW"
+                            p_app, p_exp = rp[7], rp[8]
+                            p_lang = rp[17] if rp[17] in ("en", "am", "om") else "en"
                             break
-
-                next_id = max(1, len(reg_rows))
-                launch_mode = "OPEN_LAUNCH"
-                for cr in cfg_sheet.get_all_values()[1:]:
-                    if len(cr) >= 2 and cr[0].strip() == "LAUNCH_MODE":
-                        launch_mode = cr[1].strip()
-
-                if role == "student":
-                    my_phone_norm = normalize_phone(phone)
-                    matched_parent_row_idx = None
-                    matched_parent_tg = ""
-                    matched_stu_s = None
-
-                    for s_idx, s_row in enumerate(stu_rows[1:], start=2):
-                        s = s_row + [""] * (11 - len(s_row))
-                        if s[6].strip() or not s[5].strip() or s[5].strip() == str(tg_id):
-                            continue
-                        c_phone_norm = normalize_phone(s[7])
-                        c_user_norm = normalize_username(s[7])
-                        if (my_phone_norm and c_phone_norm == my_phone_norm) or (tg_username and c_user_norm == tg_username):
-                            matched_parent_row_idx = s_idx
-                            matched_parent_tg = s[5].strip()
-                            matched_stu_s = s
-                            break
-
-                    ch = children[0]
-                    grade_val = ch.get("grade", "Grade 12")
-                    stream_val = ch.get("stream", "General") if grade_val in ("Grade 11", "Grade 12") else "General"
-                    ch_fmt = ch.get("format", prog_format)
-
-                    if matched_parent_row_idx:
-                        p_status, p_app, p_exp = "NEW", "", ""
-                        for rr in reg_rows[1:]:
-                            rp = rr + [""] * (19 - len(rr))
-                            if rp[6].strip() == matched_parent_tg:
-                                p_status = rp[4].strip().upper() or "NEW"
-                                p_app = rp[7]
-                                p_exp = rp[8]
-                                break
-
-                        students_sheet.update(
-                            values=[[full_name, matched_stu_s[2], matched_stu_s[3], matched_stu_s[4], matched_parent_tg, str(tg_id), phone]],
-                            range_name=f"B{matched_parent_row_idx}:H{matched_parent_row_idx}",
-                        )
+                    if not find_registration_by_tg_id(reg_sheet, user_id):
+                        my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                        ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
                         reg_sheet.append_row([
-                            next_id, full_name, matched_stu_s[2], phone, p_status, timestamp, str(tg_id),
-                            p_app, p_exp, "0", "-1", matched_stu_s[3], my_ref_code, valid_ref_code, "0",
-                            "student", matched_stu_s[4], lang, tg_username,
+                            max(1, len(reg_rows)), s[1], s[2], "", p_status, ts, str(user_id),
+                            p_app, p_exp, "0", "-1", s[3], my_code, "", "0", "student", s[4], p_lang, tg_username,
                         ])
-                        return {
-                            "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": False,
-                            "created_children": [{"student_name": full_name, "grade": matched_stu_s[2], "stream": matched_stu_s[3], "child_contact": phone, "link_token": "", "auto_linked": True}],
-                            "launch_mode": launch_mode, "linked_parent_tg": matched_parent_tg, "linked_child_tgs": [],
-                        }
+                    return s[1], s[2], parent_tg
+            return None
 
+        linked = await asyncio.to_thread(_link_child)
+        webapp_router.invalidate_reg_cache()
+        if linked:
+            c_name, c_grade, p_tg = linked
+            if p_tg:
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(p_tg),
+                        text=f"<b>Account Linked:</b> <b>{html.escape(c_name)}</b> connected via invite link.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            await update.message.reply_text(
+                f"<b>Account Linked | አካውንቱ ተገናኝቷል | Herregni Walqabateera</b>\n\n"
+                f"Welcome <b>{html.escape(c_name)}</b> ({html.escape(c_grade)}).\n"
+                f"Tap below to open your Library, Quizzes &amp; Study Plans.\n\n"
+                f"የቀላል የጥናት ማዕከል አካውንትዎ ተከፍቷል። ከታች ያለውን ቁልፍ ተጭነው ይጠቀሙ!\n"
+                f"Baga nagaan dhuftan! Kitaabota fi qormaata banuuf buttonii gadii tuqaa.",
+                reply_markup=webapp_keyboard("Open My Study Hub | ክፈት | Bani"),
+                parse_mode="HTML",
+            )
+            return
+
+    if arg.startswith("ref_"):
+        ref_param = arg[4:].upper()
+    elif arg.lower() == "parent":
+        ref_param = "parent"
+    else:
+        ref_param = ""
+
+    def _check_or_autolink():
+        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
+        reg_rows = reg_sheet.get_all_values()
+        reg = None
+        for idx, row in enumerate(reg_rows[1:], start=2):
+            r = row + [""] * (19 - len(row))
+            if str(r[6]).strip() == str(user_id):
+                reg = (idx, r)
+                break
+
+        stu_rows = students_sheet.get_all_values()
+        child_match = None
+        for s_idx, row in enumerate(stu_rows[1:], start=2):
+            s = row + [""] * (11 - len(row))
+            if s[6].strip() == str(user_id):
+                child_match = s
+                break
+
+        auto_linked = None
+        if not reg and not child_match and tg_username:
+            for s_idx, row in enumerate(stu_rows[1:], start=2):
+                s = row + [""] * (11 - len(row))
+                if not s[6].strip() and normalize_username(s[7]) == tg_username and s[5].strip() != str(user_id):
+                    students_sheet.update_cell(s_idx, 7, str(user_id))
+                    parent_tg = s[5].strip()
+                    p_status, p_app, p_exp, p_lang = "NEW", "", "", "en"
+                    for rr in reg_rows[1:]:
+                        rp = rr + [""] * (19 - len(rr))
+                        if rp[6].strip() == parent_tg:
+                            p_status = rp[4].strip().upper() or "NEW"
+                            p_app, p_exp = rp[7], rp[8]
+                            p_lang = rp[17] if rp[17] in ("en", "am", "om") else "en"
+                            break
+                    my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                    ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
                     reg_sheet.append_row([
-                        next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
-                        "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
-                        "student", ch_fmt, lang, tg_username,
+                        max(1, len(reg_rows)), s[1], s[2], "", p_status, ts, str(user_id),
+                        p_app, p_exp, "0", "-1", s[3], my_code, "", "0", "student", s[4], p_lang, tg_username,
                     ])
-                    stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
-                    students_sheet.append_row([
-                        stu_id, full_name, grade_val, stream_val, ch_fmt,
-                        "", str(tg_id), phone, "", "NO", timestamp,
-                    ])
-                    return {
-                        "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": False,
-                        "created_children": [{"student_name": full_name, "grade": grade_val, "stream": stream_val, "child_contact": phone, "link_token": "", "auto_linked": False}],
-                        "launch_mode": launch_mode, "linked_parent_tg": "", "linked_child_tgs": [],
-                    }
+                    auto_linked = (s[1], s[2], parent_tg)
+                    break
 
-                has_sibling_discount = len(children) >= 2
-                grade_val = children[0].get("grade", "Grade 12") if len(children) == 1 else f"Parent ({len(children)} kids)"
-                stream_val = children[0].get("stream", "General") if len(children) == 1 else "General"
+        return reg, child_match, auto_linked
 
-                reg_sheet.append_row([
-                    next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
-                    "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
-                    "parent", prog_format, lang, tg_username,
-                ])
+    existing_reg, child_match, auto_linked = await asyncio.to_thread(_check_or_autolink)
 
-                stu_reg_by_phone = {}
-                stu_reg_by_user = {}
-                for rr in reg_rows[1:]:
-                    rp = rr + [""] * (19 - len(rr))
-                    r_tg = rp[6].strip()
-                    if not r_tg or r_tg == str(tg_id):
-                        continue
-                    pn = normalize_phone(rp[3])
-                    un = normalize_username(rp[18])
-                    if pn:
-                        stu_reg_by_phone[pn] = r_tg
-                    if un:
-                        stu_reg_by_user[un] = r_tg
-
-                stu_existing_by_child_tg = {}
-                for s_idx, s_row in enumerate(stu_rows[1:], start=2):
-                    s = s_row + [""] * (11 - len(s_row))
-                    if s[6].strip():
-                        stu_existing_by_child_tg[s[6].strip()] = (s_idx, s)
-
-                stu_rows_to_add, stu_batch_updates, created_children, linked_child_tgs = [], [], [], []
-                for ch in children:
-                    c_name = (ch.get("name") or full_name).strip()
-                    c_grade = ch.get("grade", "Grade 12")
-                    c_stream = ch.get("stream", "General") if c_grade in ("Grade 11", "Grade 12") else "General"
-                    c_fmt = ch.get("format", prog_format)
-                    c_contact = (ch.get("child_contact") or "").strip()
-
-                    cpn = normalize_phone(c_contact)
-                    cun = normalize_username(c_contact)
-                    matched_child_tg = (stu_reg_by_phone.get(cpn) if cpn else "") or (stu_reg_by_user.get(cun) if cun else "")
-
-                    if matched_child_tg and matched_child_tg in stu_existing_by_child_tg:
-                        ex_idx, ex_s = stu_existing_by_child_tg[matched_child_tg]
-                        stu_batch_updates.append({
-                            "range": f"F{ex_idx}:J{ex_idx}",
-                            "values": [[str(tg_id), matched_child_tg, c_contact or ex_s[7], ex_s[8], "YES" if has_sibling_discount else "NO"]],
-                        })
-                        linked_child_tgs.append((matched_child_tg, c_name))
-                        created_children.append({
-                            "student_name": c_name, "grade": c_grade, "stream": c_stream,
-                            "child_contact": c_contact, "link_token": "", "auto_linked": True,
-                        })
-                    else:
-                        stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
-                        link_tok = "" if matched_child_tg else f"child_{uuid.uuid4().hex[:8]}"
-                        if matched_child_tg:
-                            linked_child_tgs.append((matched_child_tg, c_name))
-                        stu_rows_to_add.append([
-                            stu_id, c_name, c_grade, c_stream, c_fmt,
-                            str(tg_id), matched_child_tg, c_contact, link_tok,
-                            "YES" if has_sibling_discount else "NO", timestamp,
-                        ])
-                        created_children.append({
-                            "student_name": c_name, "grade": c_grade, "stream": c_stream,
-                            "child_contact": c_contact, "link_token": link_tok, "auto_linked": bool(matched_child_tg),
-                        })
-
-                if stu_batch_updates:
-                    students_sheet.batch_update(stu_batch_updates)
-                if stu_rows_to_add:
-                    students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED")
-
-                return {
-                    "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": has_sibling_discount,
-                    "created_children": created_children, "launch_mode": launch_mode,
-                    "linked_parent_tg": "", "linked_child_tgs": linked_child_tgs,
-                }
-
-            res = await asyncio.to_thread(_write_registration)
-            invalidate_reg_cache()
-
-            bot = get_ptb_app().bot
-            bot_user = get_bot_username()
-
-            if res["linked_parent_tg"]:
-                try:
-                    await bot.send_message(
-                        chat_id=int(res["linked_parent_tg"]),
-                        text=f"<b>Account Linked:</b> Your child <b>{html.escape(full_name)}</b> registered and was linked to your Parent Dashboard.",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-
-            for c_tg, c_nm in res["linked_child_tgs"]:
-                try:
-                    await bot.send_message(
-                        chat_id=int(c_tg),
-                        text=f"<b>Parent Linked:</b> <b>{html.escape(full_name)}</b> connected your Qelal Learning student account.",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
-
-            child_lines = []
-            for ch in res["created_children"]:
-                inv = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
-                c_txt = f"• <b>{html.escape(ch['student_name'])}</b> — {html.escape(ch['grade'])}"
-                if ch["stream"] != "General":
-                    c_txt += f" ({ch['stream']})"
-                if ch["auto_linked"]:
-                    c_txt += " <b>[Auto-Linked]</b>"
-                if ch["child_contact"]:
-                    c_txt += f"\n  Contact: <code>{html.escape(ch['child_contact'])}</code>"
-                if inv:
-                    c_txt += f"\n  Invite Link: {inv}"
-                child_lines.append(c_txt)
-
-            admin_msg = (
-                f"<b>NEW {role.upper()} REGISTRATION</b>\n\n"
-                f"<b>Name:</b> {html.escape(full_name)}\n"
-                f"<b>Phone:</b> <code>{html.escape(phone)}</code>\n"
-                f"<b>TG ID:</b> <code>{tg_id}</code> | <b>Code:</b> <code>{my_ref_code}</code>\n"
-                f"{'<b>SIBLING DISCOUNT ELIGIBLE (2+ Kids)</b>\n' if res['sibling_disc'] else ''}"
-                f"{f'<b>Referred by:</b> {html.escape(res['ref_name'])} (<code>{res['valid_ref']}</code>)\n' if res['valid_ref'] else ''}\n"
-                f"<b>Students:</b>\n" + "\n".join(child_lines)
-            )
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Approve (Start 30d)", callback_data=f"approve_user:{tg_id}"),
-                InlineKeyboardButton("Reject", callback_data=f"reject_user:{tg_id}"),
-            ]])
+    if auto_linked:
+        webapp_router.invalidate_reg_cache()
+        c_name, c_grade, p_tg = auto_linked
+        if p_tg:
             try:
-                await bot.send_message(chat_id=admin_user_id, text=admin_msg, reply_markup=kb, parse_mode="HTML")
-            except Exception as e:
-                logger.warning(f"Failed notifying admin: {e}")
-
-            return {"ok": True, "referral_code": my_ref_code, "sibling_discount": res["sibling_disc"], "launch_mode": res["launch_mode"]}
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("Registration failed")
-            return JSONResponse({"ok": False, "detail": str(e)}, status_code=500)
-
-    @router.post("/api/set-lang")
-    async def api_set_lang(request: Request):
-        tg_id, _ = await require_session(request)
-        body = await request.json()
-        lang = body.get("lang") if body.get("lang") in ("en", "am", "om") else "en"
-
-        def _update():
-            reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
-            for idx, r in enumerate(reg_sheet.get_all_values()[1:], start=2):
-                if len(r) >= 7 and r[6].strip() == str(tg_id):
-                    reg_sheet.update_cell(idx, 18, lang)
-                    return
-
-        await asyncio.to_thread(_update)
-        invalidate_reg_cache()
-        return {"ok": True, "lang": lang}
-
-    @router.get("/api/library")
-    async def api_library(request: Request, refresh: bool = False):
-        _, access = await require_session(request)
-        if refresh and access.get("is_admin"):
-            invalidate_library_cache()
-        items, _, _ = await get_library_and_keys()
-
-        trial_ids = set()
-        if access["tier"] == "TRIAL":
-            trial_ids = get_trial_doc_ids(items, access["grade"], access["stream"])
-
-        public_items = []
-        for it in items:
-            is_unlocked = (access["tier"] == "FULL") or (it["doc_id"] in trial_ids)
-            linked_id = "" if it["link_status"] == "REJECTED_MISMATCH" else it["linked_doc_id"]
-            public_items.append({
-                "doc_id": it["doc_id"],
-                "file_name": it["file_name"],
-                "grade": it["grade"],
-                "stream": it["stream"],
-                "subject": it["subject"],
-                "category": it["category"],
-                "year": it["year"],
-                "round_or_code": it["round_or_code"],
-                "linked_doc_id": linked_id if (access["tier"] == "FULL" or linked_id in trial_ids) else "",
-                "link_status": it["link_status"],
-                "has_embedded_answer": it["has_embedded_answer"],
-                "format": it["format"],
-                "file_size_mb": it["file_size_mb"],
-                "has_pdf": bool(it["drive_pdf_id"] or (it["telegram_file_id"] and it["file_name"].lower().endswith(".pdf"))),
-                "has_quiz": it["has_quiz"],
-                "quiz_total_q": it["quiz_total_q"],
-                "locked": not is_unlocked,
-                "is_trial": it["is_trial"],
-                "is_trial_pick": it["doc_id"] in trial_ids,
-            })
-        return {"ok": True, "tier": access["tier"], "launch_mode": access["launch_mode"], "items": public_items}
-
-    @router.api_route("/api/file/{doc_id}/stream", methods=["GET", "HEAD"])
-    async def api_stream_file(doc_id: str, request: Request, token: str | None = None):
-        tg_id, access = await require_session(request, token=token)
-        items, by_id, _ = await get_library_and_keys()
-        item = by_id.get(doc_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        if access["tier"] == "TRIAL":
-            trial_ids = get_trial_doc_ids(items, access["grade"], access["stream"])
-            if doc_id not in trial_ids:
-                raise HTTPException(status_code=403, detail="Locked in Trial Mode")
-
-        url, auth_headers, fname, mime_type = await get_upstream_source(item)
-
-        if request.method == "HEAD":
-            return Response(status_code=200, headers={"Accept-Ranges": "bytes", "Content-Type": mime_type})
-
-        range_hdr = request.headers.get("range", "")
-        if not range_hdr or range_hdr.startswith("bytes=0-"):
-            await log_analytics(tg_id, access, "VIEW", doc_id, item["file_name"], item["subject"])
-
-        upstream_headers = dict(auth_headers)
-        if range_hdr:
-            upstream_headers["Range"] = range_hdr
-
-        client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
-        req = client.build_request("GET", url, headers=upstream_headers)
-        upstream_resp = await client.send(req, stream=True)
-        if upstream_resp.status_code >= 400:
-            err_preview = (await upstream_resp.aread()).decode("utf-8", "ignore")[:250]
-            logger.error(f"Upstream stream error ({upstream_resp.status_code}) for {doc_id}: {err_preview}")
-            await upstream_resp.aclose()
-            await client.aclose()
-            raise HTTPException(status_code=upstream_resp.status_code, detail="Storage error")
-
-        resp_headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Disposition": content_disposition_header("inline", fname),
-            "Cache-Control": "no-store",
-        }
-        for h in ("content-length", "content-range"):
-            if h in upstream_resp.headers:
-                resp_headers[h.title()] = upstream_resp.headers[h]
-
-        async def close_upstream():
-            await upstream_resp.aclose()
-            await client.aclose()
-
-        return StreamingResponse(
-            upstream_resp.aiter_bytes(chunk_size=65536),
-            status_code=upstream_resp.status_code,
-            headers=resp_headers,
-            media_type=mime_type,
-            background=BackgroundTask(close_upstream),
-        )
-
-    @router.post("/api/file/{doc_id}/send")
-    async def api_send_offline_telegram(doc_id: str, request: Request):
-        tg_id, access = await require_session(request)
-        items, by_id, _ = await get_library_and_keys()
-        item = by_id.get(doc_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        if access["tier"] == "TRIAL":
-            trial_ids = get_trial_doc_ids(items, access["grade"], access["stream"])
-            if doc_id not in trial_ids:
-                raise HTTPException(status_code=403, detail="Locked in Trial Mode")
-
-        bot = get_ptb_app().bot
-        caption = (
-            f"<b>{html.escape(item['file_name'])}</b>\n"
-            f"{item['grade']} · {item['subject']} · {item['category']}\n"
-            f"<i>Protected for offline reading inside Telegram only (forwarding and local saving disabled).</i>"
-        )
-
-        if item["telegram_file_id"]:
-            await bot.send_document(
-                chat_id=tg_id, document=item["telegram_file_id"],
-                caption=caption, protect_content=True, parse_mode="HTML",
-            )
-            await log_analytics(tg_id, access, "SEND_CHAT", doc_id, item["file_name"], item["subject"])
-            return {"ok": True, "cached": True}
-
-        if item["file_size_mb"] > 48:
-            return {"ok": False, "too_large": True, "message": "This book exceeds Telegram's 48 MB bot send limit. Read it directly in the in-app viewer."}
-
-        url, auth_headers, fname, _ = await get_upstream_source(item)
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                tmp_path = tmp.name
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                async with client.stream("GET", url, headers=auth_headers) as r:
-                    r.raise_for_status()
-                    with open(tmp_path, "wb") as f:
-                        async for chunk in r.aiter_bytes(chunk_size=65536):
-                            f.write(chunk)
-
-            with open(tmp_path, "rb") as f:
-                sent_msg = await bot.send_document(
-                    chat_id=tg_id, document=f, filename=fname,
-                    caption=caption, protect_content=True, parse_mode="HTML",
+                await context.bot.send_message(
+                    chat_id=int(p_tg),
+                    text=f"<b>Account Linked:</b> Your child <b>{html.escape(c_name)}</b> started the bot and was linked automatically.",
+                    parse_mode="HTML",
                 )
+            except Exception:
+                pass
+        await update.message.reply_text(
+            f"<b>Welcome, {html.escape(c_name)}!</b> ({html.escape(c_grade)})\n\n"
+            f"Your parent pre-registered you on <b>Qelal Learning (ቀላል)</b>, so your account is already linked!\n"
+            f"ወላጅዎ ቀድመው ስለመዘገቡዎት አካውንትዎ ተገናኝቷል።\n"
+            f"Maatiin keessan dursanii waan isin galmeessaniif herregni keessan walqabateera!\n\n"
+            f"Tap below to open your Library, Quizzes &amp; Study Plans:",
+            reply_markup=webapp_keyboard("Open My Study Hub | ክፈት | Bani"),
+            parse_mode="HTML",
+        )
+        return
 
-            if sent_msg.document and not item["telegram_file_id"]:
-                new_tg_id = sent_msg.document.file_id
-                item["telegram_file_id"] = new_tg_id
+    if existing_reg or child_match:
+        name = existing_reg[1][1] if existing_reg else child_match[1]
+        await update.message.reply_text(
+            f"<b>Welcome back, {html.escape(name)}! | እንኳን ደህና መጡ! | Baga nagaan deebitan!</b>\n\n"
+            f"Tap below to open your <b>Qelal Learning (ቀላል)</b> Library, Quizzes, Study Plans &amp; Progress Dashboard.\n\n"
+            f"Call: <code>+251 933 510 682</code> / <code>+251 988 666 328</code>",
+            reply_markup=webapp_keyboard("Open Qelal Hub · ቀላልን ክፈት · Bani"),
+            parse_mode="HTML",
+        )
+        return
 
-                def _save_tg_id():
-                    _, pdf_sheet, _, _, _, _, _, _ = get_all_worksheets_fn()
-                    pdf_sheet.update_cell(item["row_idx"], 18, new_tg_id)
+    ref_line = (
+        f"\n<b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n"
+        if (ref_param and ref_param != "parent")
+        else ""
+    )
+    welcome_msg = (
+        f"<b>QELAL LEARNING (ቀላል) — Bishoftu Study &amp; Exam Hub</b>\n"
+        f"<i>Grades 1–12 · Grade 6 &amp; 8 Ministry · Grade 12 ESSLCE</i>\n"
+        f"{ref_line}\n"
+        f"<b>English:</b>\n"
+        f"Prepare for national and school exams with <b>400+ organized textbooks &amp; past papers</b>, <b>auto-graded bubble-sheet quizzes</b>, <b>study plans</b>, and <b>parent progress tracking</b> (with <b>sibling discounts</b> for 2+ children).\n\n"
+        f"<b>አማርኛ:</b>\n"
+        f"ከ1ኛ–12ኛ ክፍል (ለ6ኛ፣ 8ኛ ሚኒስትሪ እና ለ12ኛ ክፍል ብሔራዊ ፈተና) የሚያዘጋጁ <b>400+ መጽሐፍትና ያለፉ ፈተናዎች</b>፣ <b>ውጤት ወዲያውኑ የሚያሳዩ ጥያቄዎች</b>፣ <b>የጥናት እቅዶች</b> እና <b>ለወላጆች የልጆች ውጤት መከታተያ</b>!\n\n"
+        f"<b>Afaan Oromoo:</b>\n"
+        f"Barattoota kutaa 1–12 (qormaata Ministirii kutaa 6 &amp; 8 fi ESSLCE kutaa 12) tiif <b>kitaabotaa fi qormaata darban 400+</b>, <b>qormaata shaakalaa battalumatti sirreeffamu</b>, <b>karoora qo'annoo</b> fi <b>hordoffii maatii</b> (hir'ina kaffaltii obbolaa waliin)!\n\n"
+        f"<b>How to Register | እንዴት መመዝገብ ይችላሉ | Akkaataa Galmee:</b>\n"
+        f"1. Tap below to choose <b>English / አማርኛ / Afaan Oromoo</b> and register in 60 seconds.\n"
+        f"2. Or call us directly:\n"
+        f"<code>+251 933 510 682</code>\n"
+        f"<code>+251 988 666 328</code>"
+    )
+    await update.message.reply_text(
+        welcome_msg,
+        reply_markup=webapp_keyboard("Launch Qelal Mini App · ክፈት · Bani", ref_code=ref_param),
+        parse_mode="HTML",
+    )
 
-                await asyncio.to_thread(_save_tg_id)
 
-            await log_analytics(tg_id, access, "SEND_CHAT", doc_id, item["file_name"], item["subject"])
-            return {"ok": True, "cached": False}
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.remove(tmp_path)
+async def open_library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_command(update, context)
 
-    # --- QUIZ ME ENDPOINTS ---
-    @router.get("/api/quiz/{doc_id}")
-    async def api_get_quiz_meta(doc_id: str, request: Request):
-        _, access = await require_session(request)
-        _, by_id, keys_by_id = await get_library_and_keys()
-        item = by_id.get(doc_id)
-        key_data = keys_by_id.get(doc_id)
-        if not item or not key_data:
-            raise HTTPException(status_code=404, detail="Quiz key not available")
 
-        total_q = key_data["total_q"]
-        trial_limited = access["tier"] == "TRIAL"
-        unlocked_q = min(10, total_q) if trial_limited else total_q
-        return {
-            "ok": True, "doc_id": doc_id, "file_name": item["file_name"],
-            "subject": item["subject"], "year": item["year"],
-            "total_q": total_q, "unlocked_q": unlocked_q,
-            "trial_limited": trial_limited, "sections": key_data["sections"],
-        }
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
-    @router.post("/api/quiz/{doc_id}/submit")
-    async def api_submit_quiz(doc_id: str, request: Request):
-        tg_id, access = await require_session(request)
-        _, by_id, keys_by_id = await get_library_and_keys()
-        item = by_id.get(doc_id)
-        key_data = keys_by_id.get(doc_id)
-        if not item or not key_data:
-            raise HTTPException(status_code=404, detail="Quiz not found")
+    def _get_or_create_code():
+        reg_sheet, _ = get_sheets()
+        found = find_registration_by_tg_id(reg_sheet, user_id)
+        if not found:
+            return None
+        idx, r = found
+        code = r[12].strip()
+        if not code:
+            code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+            reg_sheet.update_cell(idx, 13, code)
+        count = int(r[14]) if r[14].isdigit() else 0
+        return r[1], code, count
 
-        body = await request.json()
-        user_answers = body.get("answers", {})
-        answers_map = key_data["answers"]
-        trial_limited = access["tier"] == "TRIAL"
-        max_q = min(10, key_data["total_q"]) if trial_limited else key_data["total_q"]
+    res = await asyncio.to_thread(_get_or_create_code)
+    if not res:
+        await update.message.reply_text(
+            "Please launch the Mini App via /start to register and get your Referral Code.\n"
+            "እባክዎ መጀመሪያ /start በመጫን ይመዝገቡ።\n"
+            "Maaloo /start tuquun dursa galmaa'aa.",
+            reply_markup=webapp_keyboard("Register in Mini App"),
+        )
+        return
 
-        score, graded, breakdown = 0, 0, []
-        for q_num in range(1, max_q + 1):
-            q_str = str(q_num)
-            correct = answers_map.get(q_str)
-            if not correct:
-                continue
-            graded += 1
-            yours = str(user_answers.get(q_str, "")).upper().strip()
-            is_right = yours == correct
-            if is_right:
-                score += 1
-            breakdown.append({"q": q_num, "yours": yours or "-", "correct": correct, "ok": is_right})
+    name, code, count = res
+    link = referral_invite_url(code)
+    share_text = f"Join Qelal Learning (Bishoftu) for Grades 1-12 Exam Prep & Quizzes! Use my code: {code}"
+    share_url = f"https://t.me/share/url?url={quote(link)}&text={quote(share_text)}" if link else ""
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Share Invite on Telegram", url=share_url)]]) if share_url else None
 
-        pct = round((score / graded) * 100, 1) if graded else 0.0
-        await log_analytics(tg_id, access, "QUIZ_SUBMIT", doc_id, item["file_name"], item["subject"], f"{score}/{graded} ({pct}%)")
-        return {"ok": True, "score": score, "total_graded": graded, "percentage": pct, "trial_limited": trial_limited, "breakdown": breakdown}
+    await update.message.reply_text(
+        f"<b>Study Squad Referral Program | የግብዣ ፕሮግራም | Sagantaa Afeerraa</b>\n\n"
+        f"<b>Name:</b> {html.escape(name)}\n"
+        f"<b>Your Code:</b> <code>{code}</code>\n"
+        f"<b>Verified Referrals:</b> <b>{count}</b> friend(s)\n"
+        f"{f'<b>Invite Link:</b> {link}' if link else ''}\n\n"
+        f"<i>Invite 2 friends for Study Squad seating, bound formula folders &amp; tuition perks.</i>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
-    # --- STUDY PLANS & PROGRESS ---
-    @router.get("/api/study-plans")
-    async def api_study_plans(request: Request):
-        _, access = await require_session(request)
-        trial_limited = access["tier"] == "TRIAL"
-        plans = []
-        for p in STUDY_PLAN_TEMPLATES:
-            tasks = [{"id": t["id"], "label": t["label"], "locked": trial_limited and idx >= 3} for idx, t in enumerate(p["tasks"])]
-            plans.append({
-                "id": p["id"], "title": p["title"], "stream": p["stream"],
-                "grade": p["grade"], "description": p["description"],
-                "trial_limited": trial_limited, "tasks": tasks,
-            })
-        return {"ok": True, "plans": plans, "trial_limited": trial_limited}
 
-    @router.get("/api/progress")
-    async def api_get_progress(request: Request):
-        tg_id, _ = await require_session(request)
+# ==============================================================================
+# 2. LAUNCH PHASE TOGGLE (/end_launch & /reopen_launch)
+# ==============================================================================
+async def end_launch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    cfg = await asyncio.to_thread(get_config_dict)
+    if cfg.get("LAUNCH_MODE") == "PAID_GATED":
+        await update.message.reply_text("Launch Phase is already ended. Paid/Approved access mode is active.")
+        return
 
-        def _load():
-            _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            for row in prog_sheet.get_all_values()[1:]:
-                r = row + [""] * (6 - len(row))
-                if r[0].strip() == str(tg_id):
-                    return {
-                        "bookmarks": json.loads(r[1]) if r[1] else [],
-                        "last_read": json.loads(r[2]) if r[2] else {},
-                        "plan_progress": json.loads(r[3]) if r[3] else {},
-                        "custom_plan": json.loads(r[4]) if r[4] else [],
-                    }
-            return {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Confirm: End Launch Phase", callback_data="launch_confirm:PAID_GATED"),
+        InlineKeyboardButton("Keep Free Launch", callback_data="launch_cancel"),
+    ]])
+    await update.message.reply_text(
+        "<b>Confirm Ending Launch Phase?</b>\n\n"
+        "• Only <b>APPROVED</b> (and 7-day grace <b>EXPIRED</b>) users keep unlimited access.\n"
+        "• All <b>NEW</b> and <b>LEFT</b> users switch to <b>Trial Mode</b> (3 grade books + limited Study Plan + 10-Q Quiz preview).",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
-        return {"ok": True, **(await asyncio.to_thread(_load))}
 
-    @router.post("/api/progress")
-    async def api_save_progress(request: Request):
-        tg_id, _ = await require_session(request)
-        body = await request.json()
-        now_str = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
+async def reopen_launch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "OPEN_LAUNCH")
+    webapp_router.invalidate_config_cache()
+    await update.message.reply_text("Reopened <b>OPEN_LAUNCH</b> mode (all registered users have unlimited free access).", parse_mode="HTML")
 
-        def _save():
-            _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            rows = prog_sheet.get_all_values()
-            new_row = [
-                str(tg_id), json.dumps(body.get("bookmarks", [])),
-                json.dumps(body.get("last_read", {})), json.dumps(body.get("plan_progress", {})),
-                json.dumps(body.get("custom_plan", [])), now_str,
-            ]
-            for idx, row in enumerate(rows[1:], start=2):
-                if row and row[0].strip() == str(tg_id):
-                    prog_sheet.update(values=[new_row], range_name=f"A{idx}:F{idx}")
-                    return
-            prog_sheet.append_row(new_row)
 
-        await asyncio.to_thread(_save)
-        return {"ok": True}
+async def launch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+    await query.answer()
+    if query.data == "launch_cancel":
+        await query.edit_message_text("Kept <b>OPEN_LAUNCH</b> mode active.", parse_mode="HTML")
+        return
 
-    @router.post("/api/request-material")
-    async def api_request_material(request: Request):
-        tg_id, access = await require_session(request)
-        body = await request.json()
-        subject = (body.get("subject") or "").strip()
-        details = (body.get("details") or "").strip()
-        if not details:
-            raise HTTPException(status_code=400, detail="Missing details")
+    await asyncio.to_thread(set_config_value, "LAUNCH_MODE", "PAID_GATED")
+    webapp_router.invalidate_config_cache()
+    await query.edit_message_text("<b>Launch Phase Ended.</b> Only approved/paid members now get unlimited access.", parse_mode="HTML")
 
-        await get_ptb_app().bot.send_message(
-            chat_id=admin_user_id,
+
+# ==============================================================================
+# 3. ADMIN APPROVALS, REFERRALS, RENEWALS & PDF PASSES
+# ==============================================================================
+async def send_student_pass_pdf(bot, student_row: list[str], months_paid: int, approved_at: str, expires_on: str, is_renewal: bool):
+    tg_id = int(student_row[6].strip())
+    grade_str = f"{student_row[2]} ({student_row[11]})" if len(student_row) >= 12 and student_row[11] and student_row[11] != "General" else student_row[2]
+    ref_code = student_row[12] if len(student_row) >= 13 else ""
+
+    pdf_buf = generate_membership_pdf(
+        student_id=student_row[0], name=student_row[1], grade=grade_str, phone=student_row[3],
+        tg_id=tg_id, months_paid=months_paid, approved_at=approved_at, expires_on=expires_on,
+        referral_code=ref_code, is_renewal=is_renewal,
+    )
+    filename = f"Qelal_Pass_{student_row[1].replace(' ', '_')}_M{months_paid}.pdf"
+    caption = (
+        f"<b>{'Monthly Renewal Confirmed' if is_renewal else 'Registration Approved | ምዝገባዎ ጸድቋል | Galmeen Mirkanaa\'eera'}</b>\n\n"
+        f"Attached is your official Qelal Pass &amp; Receipt (Valid until <b>{expires_on}</b>).\n"
+        f"Tap below to open all 400+ books, exams &amp; full quizzes."
+    )
+    await bot.send_document(
+        chat_id=tg_id, document=pdf_buf, filename=filename, caption=caption,
+        reply_markup=webapp_keyboard("Open Qelal Hub · ክፈት · Bani"), parse_mode="HTML",
+    )
+
+
+def credit_referrer_if_first_approval(reg_sheet, all_rows: list[list[str]], student_row: list[str]):
+    months_prev = int(student_row[9]) if len(student_row) > 9 and student_row[9].isdigit() else 0
+    referred_by = student_row[13].strip().upper() if len(student_row) > 13 else ""
+    if months_prev > 0 or not referred_by:
+        return None
+
+    for idx, row in enumerate(all_rows[1:], start=2):
+        r = row + [""] * (19 - len(row))
+        if r[12].strip().upper() == referred_by and r[6].strip() != student_row[6].strip():
+            new_cnt = (int(r[14]) if r[14].isdigit() else 0) + 1
+            r[14] = str(new_cnt)
+            all_rows[idx - 1] = r
+            reg_sheet.update_cell(idx, 15, str(new_cnt))
+            return int(r[6].strip()), r[1], referred_by, new_cnt, student_row[1]
+    return None
+
+
+async def notify_referrer(bot, credit_info):
+    if not credit_info:
+        return
+    ref_tg_id, _, code, new_cnt, friend_name = credit_info
+    try:
+        await bot.send_message(
+            chat_id=ref_tg_id,
             text=(
-                f"<b>MATERIAL REQUEST ({access.get('role','student').upper()})</b>\n\n"
-                f"<b>Name:</b> {html.escape(access.get('name', 'Student'))} ({html.escape(access.get('grade', ''))})\n"
-                f"<b>Phone:</b> <code>{html.escape(access.get('phone', ''))}</code> | <b>TG ID:</b> <code>{tg_id}</code>\n"
-                f"<b>Subject:</b> {html.escape(subject or 'General')}\n"
-                f"<b>Request:</b> {html.escape(details)}"
+                f"<b>Referral Reward Credited</b>\n\n"
+                f"<b>{html.escape(friend_name)}</b> was approved using your code <code>{code}</code>.\n"
+                f"<b>Verified Referrals:</b> <b>{new_cnt}</b>"
             ),
             parse_mode="HTML",
         )
-        return {"ok": True}
+    except Exception as e:
+        logger.warning(f"Failed notifying referrer {ref_tg_id}: {e}")
 
-    # --- LIVE PARENT VISUAL ANALYTICS ---
-    @router.get("/api/parent/analytics")
-    async def api_parent_analytics(request: Request):
-        tg_id, access = await require_session(request)
-        bundle = await get_reg_bundle()
-        _, by_id, _ = await get_library_and_keys()
 
-        children = bundle["children_by_parent"].get(str(tg_id), [])
-        if not children and access.get("role") != "parent":
-            return {"ok": True, "children_analytics": []}
+async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
 
-        def _load_raw():
-            _, _, _, analytics_sheet, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            return analytics_sheet.get_all_values()[1:], prog_sheet.get_all_values()[1:]
+    def _fetch():
+        reg_sheet, _ = get_sheets()
+        return reg_sheet.get_all_values()
 
-        ana_sheet_rows, prog_rows = await asyncio.to_thread(_load_raw)
-        all_ana_rows = ana_sheet_rows + list(state["analytics_buffer"])
+    rows = await asyncio.to_thread(_fetch)
+    new_leads = [row for row in rows[1:] if len(row) >= 5 and row[4].strip().upper() == "NEW"]
+    if not new_leads:
+        await update.message.reply_text("All caught up. No NEW registrations right now.")
+        return
 
-        prog_by_tg = {}
-        for pr in prog_rows:
-            p = pr + [""] * (6 - len(pr))
-            if p[0].strip():
+    msg = f"<b>PENDING REGISTRATIONS ({len(new_leads)}):</b>\n\n"
+    buttons = []
+    for row in new_leads:
+        r = row + [""] * (19 - len(row))
+        role_tag = "Parent" if r[15] == "parent" else "Student"
+        msg += f"• {role_tag}: <b>{html.escape(r[1])}</b> | {html.escape(r[2])} | <code>{html.escape(r[3])}</code>\n"
+        if r[6].strip():
+            buttons.append([InlineKeyboardButton(f"Approve {r[1]}", callback_data=f"approve_user:{r[6].strip()}")])
+
+    buttons.append([InlineKeyboardButton("Approve All NEW Leads", callback_data="approve_all_new")])
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+
+async def handle_student_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+
+    data = query.data
+    await query.answer("Updating record...")
+    today = datetime.now(EAT_TZ).date()
+
+    if data == "approve_all_new":
+        def _approve_all():
+            reg_sheet, _ = get_sheets()
+            rows = reg_sheet.get_all_values()
+            updates, approved_students, ref_credits = [], [], []
+            expires_str = (today + timedelta(days=30)).isoformat()
+            today_str = today.isoformat()
+            for idx, row in enumerate(rows[1:], start=2):
+                r = row + [""] * (19 - len(row))
+                if r[4].strip().upper() == "NEW" and r[6].strip():
+                    ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                    updates.append({
+                        "range": f"E{idx}:S{idx}",
+                        "values": [[
+                            "APPROVED", r[5], r[6], today_str, expires_str, "1", "0",
+                            r[11] or "General", ref_code, r[13], r[14] or "0",
+                            r[15] or "student", r[16] or "Weekend Hub", r[17] or "en", r[18],
+                        ]],
+                    })
+                    r[12] = ref_code
+                    approved_students.append((r, 1, today_str, expires_str))
+                    c_info = credit_referrer_if_first_approval(reg_sheet, rows, r)
+                    if c_info:
+                        ref_credits.append(c_info)
+            if updates:
+                reg_sheet.batch_update(updates)
+            return approved_students, ref_credits
+
+        approved_list, ref_credits = await asyncio.to_thread(_approve_all)
+        webapp_router.invalidate_reg_cache()
+
+        for row, months, app_at, exp_on in approved_list:
+            try:
+                await send_student_pass_pdf(context.bot, row, months, app_at, exp_on, is_renewal=False)
+            except Exception as e:
+                logger.warning(f"Pass PDF send failed for {row[6]}: {e}")
+        for ci in ref_credits:
+            await notify_referrer(context.bot, ci)
+
+        await query.edit_message_text(f"Approved <b>{len(approved_list)}</b> account(s) and sent PDF passes.", parse_mode="HTML")
+        return
+
+    action, tg_id_str = data.split(":", 1)
+
+    if action in ("approve_user", "mark_paid"):
+        is_renewal = action == "mark_paid"
+
+        def _activate_or_renew():
+            reg_sheet, _ = get_sheets()
+            rows = reg_sheet.get_all_values()
+            for idx, row in enumerate(rows[1:], start=2):
+                r = row + [""] * (19 - len(row))
+                if r[6].strip() == tg_id_str:
+                    prev_months = int(r[9]) if r[9].isdigit() else 0
+                    new_months = prev_months + 1
+                    new_expires = today + timedelta(days=30)
+                    if is_renewal and r[8]:
+                        try:
+                            old_exp = datetime.strptime(r[8], "%Y-%m-%d").date()
+                            if old_exp >= today:
+                                new_expires = old_exp + timedelta(days=30)
+                        except ValueError:
+                            pass
+                    app_at = r[7] if (is_renewal and r[7]) else today.isoformat()
+                    exp_str = new_expires.isoformat()
+                    ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                    reg_sheet.update(
+                        values=[[
+                            "APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0",
+                            r[11] or "General", ref_code, r[13], r[14] or "0",
+                            r[15] or "student", r[16] or "Weekend Hub", r[17] or "en", r[18],
+                        ]],
+                        range_name=f"E{idx}:S{idx}",
+                    )
+                    r[12] = ref_code
+                    c_info = credit_referrer_if_first_approval(reg_sheet, rows, r)
+                    return r, new_months, today.isoformat(), exp_str, c_info
+            return None
+
+        res = await asyncio.to_thread(_activate_or_renew)
+        webapp_router.invalidate_reg_cache()
+        if not res:
+            await query.edit_message_text("Record not found in Google Sheet.")
+            return
+
+        r, months, issue_date, exp_str, c_info = res
+        try:
+            await send_student_pass_pdf(context.bot, r, months, issue_date, exp_str, is_renewal=is_renewal)
+        except Exception as e:
+            logger.warning(f"Could not send PDF pass to {tg_id_str}: {e}")
+        await notify_referrer(context.bot, c_info)
+
+        ref_note = f"\nCredited referral to {html.escape(c_info[1])} (Total: {c_info[3]})" if c_info else ""
+        await query.edit_message_text(
+            f"{'Renewed' if is_renewal else 'Approved'} <b>{html.escape(r[1])}</b> (Month #{months}, Valid until <b>{exp_str}</b>).{ref_note}",
+            parse_mode="HTML",
+        )
+        return
+
+    if action in ("reject_user", "mark_left"):
+        new_status = "REJECTED" if action == "reject_user" else "LEFT"
+
+        def _set_status():
+            reg_sheet, _ = get_sheets()
+            for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+                if len(row) >= 7 and row[6].strip() == tg_id_str:
+                    reg_sheet.update_cell(idx, 5, new_status)
+                    return row[1]
+            return None
+
+        name = await asyncio.to_thread(_set_status)
+        webapp_router.invalidate_reg_cache()
+        if name:
+            if new_status == "LEFT":
                 try:
-                    prog_by_tg[p[0].strip()] = {
-                        "bookmarks": json.loads(p[1]) if p[1] else [],
-                        "last_read": json.loads(p[2]) if p[2] else {},
-                        "plan_progress": json.loads(p[3]) if p[3] else {},
-                        "custom_plan": json.loads(p[4]) if p[4] else [],
-                    }
+                    await context.bot.send_message(
+                        chat_id=int(tg_id_str),
+                        text="Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.",
+                    )
                 except Exception:
                     pass
+            await query.edit_message_text(f"{'Marked LEFT' if new_status == 'LEFT' else 'Rejected'}: <b>{html.escape(name)}</b>", parse_mode="HTML")
 
-        today = datetime.now(eat_tz).date()
-        last_7_days = [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
-        bot_user = get_bot_username()
 
-        results = []
-        for ch in children:
-            target_tg = ch["child_tg_id"] or (str(tg_id) if len(children) == 1 else "")
-            is_shared_phone = not bool(ch["child_tg_id"])
-            inv_url = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
+# ==============================================================================
+# 4. PARENT PROGRESS REPORT ADMIN APPROVAL GATE (/review_reports)
+# ==============================================================================
+async def review_reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
 
-            child_events = [r for r in all_ana_rows if len(r) >= 8 and target_tg and str(r[1]).strip() == target_tg]
-            child_prog = prog_by_tg.get(target_tg, {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []})
+    def _fetch():
+        _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
+        stu_map = {}
+        for row in students_sheet.get_all_values()[1:]:
+            s = row + [""] * (11 - len(row))
+            if s[0]:
+                stu_map[s[0]] = s
+        pending = []
+        for idx, row in enumerate(reports_sheet.get_all_values()[1:], start=2):
+            rp = row + [""] * (10 - len(row))
+            if rp[7].strip() == "Pending_Admin":
+                pending.append((idx, rp, stu_map.get(rp[1])))
+        return pending[:5]
 
-            unique_docs_viewed, total_views, offline_saved = set(), 0, 0
-            quiz_trend, subj_map = [], {}
-            daily_counts = {d: 0 for d in last_7_days}
+    pending = await asyncio.to_thread(_fetch)
+    if not pending:
+        await update.message.reply_text("All progress reports reviewed. No Pending_Admin rows.")
+        return
 
-            for ev in child_events:
-                e = ev + [""] * (9 - len(ev))
-                ts_str, _, _, _, action, doc_id, fname, subject, score_str = e[:9]
-                day_str = ts_str[:10]
-                if day_str in daily_counts:
-                    daily_counts[day_str] += 1
+    for row_idx, rp, stu in pending:
+        s_name = stu[1] if stu else rp[1]
+        s_grade = stu[2] if stu else ""
+        p_tg = stu[5] if stu else "Not Linked"
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Approve & Send", callback_data=f"rpt_approve:{row_idx}"),
+            InlineKeyboardButton("Hold", callback_data=f"rpt_hold:{row_idx}"),
+            InlineKeyboardButton("Skip", callback_data=f"rpt_skip:{row_idx}"),
+        ]])
+        await update.message.reply_text(
+            f"<b>APPROVE PROGRESS REPORT?</b>\n"
+            f"<b>Student:</b> {html.escape(s_name)} ({html.escape(s_grade)})\n"
+            f"<b>Period:</b> {html.escape(rp[2])} | {html.escape(rp[9] or 'Tutor')}\n"
+            f"<b>Attendance:</b> {html.escape(rp[3])}\n"
+            f"<b>Scores:</b> {html.escape(rp[4])}\n"
+            f"<b>Improved:</b> {html.escape(rp[5])}\n"
+            f"<b>Next Focus:</b> {html.escape(rp[6])}\n"
+            f"<b>Parent TG:</b> <code>{p_tg}</code>",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
 
-                subj = subject or "General"
-                subj_map.setdefault(subj, {"subject": subj, "views": 0, "quizzes": 0, "pct_sum": 0.0})
 
-                if action == "VIEW":
-                    total_views += 1
-                    unique_docs_viewed.add(doc_id)
-                    subj_map[subj]["views"] += 1
-                elif action == "SEND_CHAT":
-                    offline_saved += 1
-                elif action == "QUIZ_SUBMIT":
-                    m_pct = re.search(r"\((\d+(?:\.\d+)?)%\)", score_str)
-                    pct = float(m_pct.group(1)) if m_pct else 0.0
-                    quiz_trend.append({
-                        "date": ts_str,
-                        "label": fname[:26],
-                        "subject": subj,
-                        "score_text": score_str,
-                        "pct": pct,
-                    })
-                    subj_map[subj]["quizzes"] += 1
-                    subj_map[subj]["pct_sum"] += pct
+async def handle_report_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+    await query.answer()
 
-            avg_quiz_pct = round(sum(q["pct"] for q in quiz_trend) / len(quiz_trend), 1) if quiz_trend else None
-            quiz_delta_pct = round(quiz_trend[-1]["pct"] - quiz_trend[0]["pct"], 1) if len(quiz_trend) >= 2 else None
+    action, row_idx_str = query.data.split(":", 1)
+    row_idx = int(row_idx_str)
 
-            subject_stats = [
-                {
-                    "subject": s["subject"],
-                    "views": s["views"],
-                    "quizzes": s["quizzes"],
-                    "avg_pct": round(s["pct_sum"] / s["quizzes"], 1) if s["quizzes"] else None,
-                }
-                for s in subj_map.values()
-            ]
-            subject_stats.sort(key=lambda x: (x["views"] + x["quizzes"] * 2), reverse=True)
+    def _apply():
+        _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
+        rp = reports_sheet.row_values(row_idx) + [""] * 10
+        stu = None
+        for row in students_sheet.get_all_values()[1:]:
+            if row and row[0] == rp[1]:
+                stu = row + [""] * (11 - len(row))
+                break
 
-            plan_prog = child_prog.get("plan_progress", {})
-            custom_plan = child_prog.get("custom_plan", [])
-            plan_done, plan_total = 0, 0
-            for tpl in STUDY_PLAN_TEMPLATES:
-                tpl_done = sum(1 for tk in tpl["tasks"] if plan_prog.get(tk["id"]))
-                if tpl_done > 0:
-                    plan_done += tpl_done
-                    plan_total += len(tpl["tasks"])
-            if custom_plan:
-                plan_done += sum(1 for t in custom_plan if t.get("done"))
-                plan_total += len(custom_plan)
-            if plan_total == 0:
-                plan_total = 20
-            plan_pct = round((plan_done / plan_total) * 100)
+        if action == "rpt_approve":
+            now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+            reports_sheet.update(values=[["Approved", now_str]], range_name=f"H{row_idx}:I{row_idx}")
+        elif action == "rpt_hold":
+            reports_sheet.update_cell(row_idx, 8, "Held")
+        else:
+            reports_sheet.update_cell(row_idx, 8, "Skipped")
+        return rp, stu
 
-            recent_reads = []
-            for did, info in sorted(child_prog.get("last_read", {}).items(), key=lambda x: x[1].get("ts", 0), reverse=True)[:5]:
-                doc_meta = by_id.get(did)
-                if doc_meta:
-                    recent_reads.append({
-                        "doc_id": did,
-                        "file_name": doc_meta["file_name"],
-                        "subject": doc_meta["subject"],
-                        "page": info.get("page", 1),
-                    })
+    rp, stu = await asyncio.to_thread(_apply)
+    webapp_router.invalidate_reg_cache()
 
-            bookmarked_docs = []
-            for did in child_prog.get("bookmarks", [])[:8]:
-                doc_meta = by_id.get(did)
-                if doc_meta:
-                    bookmarked_docs.append({
-                        "doc_id": did,
-                        "file_name": doc_meta["file_name"],
-                        "subject": doc_meta["subject"],
-                        "category": doc_meta["category"],
-                    })
+    s_name = stu[1] if stu else rp[1]
+    if action == "rpt_approve":
+        parent_tg = stu[5].strip() if stu else ""
+        if parent_tg:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(parent_tg),
+                    text=(
+                        f"<b>QELAL BI-WEEKLY PROGRESS REPORT</b>\n\n"
+                        f"<b>Student:</b> {html.escape(s_name)} ({html.escape(stu[2])})\n"
+                        f"<b>Period:</b> {html.escape(rp[2])}\n"
+                        f"<b>Attendance:</b> {html.escape(rp[3])}\n"
+                        f"<b>Scores:</b> {html.escape(rp[4])}\n"
+                        f"<b>Improved:</b> {html.escape(rp[5])}\n"
+                        f"<b>Next Focus:</b> {html.escape(rp[6])}"
+                    ),
+                    reply_markup=webapp_keyboard("View in Parent Dashboard"),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning(f"Could not send report to parent {parent_tg}: {e}")
+        await query.edit_message_text(f"Approved &amp; published report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+    elif action == "rpt_hold":
+        await query.edit_message_text(f"Held report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
+    else:
+        await query.edit_message_text(f"Skipped report for <b>{html.escape(s_name)}</b>.", parse_mode="HTML")
 
-            daily_7d = [
-                {"day": datetime.strptime(d_iso, "%Y-%m-%d").strftime("%a"), "date": d_iso, "count": daily_counts[d_iso]}
-                for d_iso in last_7_days
-            ]
 
-            results.append({
-                "student_id": ch["student_id"],
-                "student_name": ch["student_name"],
-                "grade": ch["grade"],
-                "stream": ch["stream"],
-                "format": ch["format"],
-                "is_linked": bool(ch["child_tg_id"]),
-                "is_shared_phone": is_shared_phone,
-                "invite_url": inv_url,
-                "kpis": {
-                    "pdfs_opened": len(unique_docs_viewed),
-                    "total_views": total_views,
-                    "offline_saved": offline_saved,
-                    "quizzes_taken": len(quiz_trend),
-                    "avg_quiz_pct": avg_quiz_pct,
-                    "quiz_delta_pct": quiz_delta_pct,
-                    "bookmarks_count": len(child_prog.get("bookmarks", [])),
-                    "plan_done": plan_done,
-                    "plan_total": plan_total,
-                    "plan_pct": plan_pct,
-                },
-                "quiz_trend": quiz_trend[-10:],
-                "subject_stats": subject_stats[:6],
-                "daily_7d": daily_7d,
-                "recent_reads": recent_reads,
-                "bookmarked_docs": bookmarked_docs,
-            })
+# ==============================================================================
+# 5. AUTOMATED 30-DAY BILLING CHECKER & GRACE ALERTS
+# ==============================================================================
+async def run_daily_billing_check(bot):
+    today = datetime.now(EAT_TZ).date()
 
-        return {"ok": True, "children_analytics": results}
+    def _scan_billing():
+        reg_sheet, _ = get_sheets()
+        updates, alerts = [], []
+        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+            r = row + [""] * (19 - len(row))
+            status, tg_id, exp_str = r[4].strip().upper(), r[6].strip(), r[8].strip()
+            if not tg_id or not exp_str or status not in ("APPROVED", "EXPIRED"):
+                continue
+            try:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            except ValueError:
+                continue
 
-    # ==========================================================================
-    # ADMIN CONSOLE ROUTES
-    # ==========================================================================
-    @router.get("/api/admin/overview")
-    async def api_admin_overview(request: Request):
-        await require_admin
+            days_left = (exp_date - today).days
+            elapsed_day = 30 - days_left
+            last_alert = int(r[10]) if r[10].lstrip("-").isdigit() else -1
+
+            if elapsed_day in (23, 26, 29) and status == "APPROVED" and last_alert < elapsed_day:
+                updates.append({"range": f"K{idx}", "values": [[str(elapsed_day)]]})
+                alerts.append(("REMINDER", r[1], r[2], r[3], tg_id, elapsed_day, days_left))
+            elif 30 <= elapsed_day <= 37 and last_alert < elapsed_day:
+                if status != "EXPIRED":
+                    updates.append({"range": f"E{idx}", "values": [["EXPIRED"]]})
+                updates.append({"range": f"K{idx}", "values": [[str(elapsed_day)]]})
+                alerts.append(("GRACE", r[1], r[2], r[3], tg_id, elapsed_day, days_left))
+            elif elapsed_day >= 38:
+                updates.append({"range": f"E{idx}", "values": [["LEFT"]]})
+                updates.append({"range": f"K{idx}", "values": [[str(elapsed_day)]]})
+                alerts.append(("AUTO_LEFT", r[1], r[2], r[3], tg_id, elapsed_day, days_left))
+        if updates:
+            reg_sheet.batch_update(updates)
+        return alerts
+
+    alerts = await asyncio.to_thread(_scan_billing)
+    if alerts:
+        webapp_router.invalidate_reg_cache()
+
+    for kind, name, grade, phone, tg_id, day_num, days_left in alerts:
+        safe_name, safe_phone = html.escape(name), html.escape(phone)
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Paid (+30d)", callback_data=f"mark_paid:{tg_id}"),
+            InlineKeyboardButton("Mark Left", callback_data=f"mark_left:{tg_id}"),
+        ]])
+        if kind == "REMINDER":
+            await bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"<b>Renewal Reminder — Day {day_num}/30 ({days_left}d left)</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>",
+                reply_markup=kb, parse_mode="HTML",
+            )
+        elif kind == "GRACE":
+            await bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"<b>EXPIRED (Grace Day {day_num - 30}/7 — Day {day_num})</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>\n<i>User keeps access during the 7-day grace window.</i>",
+                reply_markup=kb, parse_mode="HTML",
+            )
+        elif kind == "AUTO_LEFT":
+            await bot.send_message(
+                chat_id=ADMIN_USER_ID,
+                text=f"<b>AUTO-MOVED TO LEFT (Day {day_num})</b>\n{safe_name} ({html.escape(grade)})\n<code>{safe_phone}</code>\n<i>Grace week ended. Downgraded to Trial.</i>",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Reactivate (Paid)", callback_data=f"mark_paid:{tg_id}")]]),
+                parse_mode="HTML",
+            )
+            try:
+                await bot.send_message(chat_id=int(tg_id), text="Your monthly tutoring plan has ended. Your account is now in 3-PDF Trial mode until renewed.")
+            except Exception:
+                pass
+    return len(alerts)
+
+
+async def check_billing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    sent = await run_daily_billing_check(context.bot)
+    if sent == 0:
+        await update.message.reply_text("Billing check complete — no new reminders or expirations today.")
+
+
+async def billing_scheduler_loop(bot):
+    await asyncio.sleep(15)
+    while True:
+        try:
+            await run_daily_billing_check(bot)
+        except Exception as e:
+            logger.error(f"Billing check error: {e}")
+        await asyncio.sleep(4 * 3600)
+
+
+# ==============================================================================
+# 6. STATS, BROADCASTS, BACKGROUND SMART LINK VERIFIER & DRIVE SYNC
+# ==============================================================================
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    today = datetime.now(EAT_TZ).date()
+
+    def _gather():
+        reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, cfg_sheet, _, students_sheet, _ = get_all_worksheets()
+        reg_rows = reg_sheet.get_all_values()[1:]
+        pdf_rows = pdf_sheet.get_all_values()[1:]
+        key_rows = keys_sheet.get_all_values()[1:]
+        ana_rows = analytics_sheet.get_all_values()[1:]
+        stu_rows = students_sheet.get_all_values()[1:]
+        cfg = get_config_dict(cfg_sheet)
+
+        counts = {"APPROVED": 0, "NEW": 0, "EXPIRED": 0, "LEFT": 0, "REJECTED": 0}
+        expiring_soon, total_refs = [], 0
+        for row in reg_rows:
+            r = row + [""] * (19 - len(row))
+            st = r[4].strip().upper() or "NEW"
+            counts[st] = counts.get(st, 0) + 1
+            if r[14].isdigit():
+                total_refs += int(r[14])
+            if st in ("APPROVED", "EXPIRED") and r[8]:
+                try:
+                    d_left = (datetime.strptime(r[8], "%Y-%m-%d").date() - today).days
+                    expiring_soon.append((d_left, r[1], r[2], st))
+                except ValueError:
+                    pass
+        expiring_soon.sort(key=lambda x: x[0])
+
+        verified_links = sum(1 for r in pdf_rows if len(r) >= 21 and r[20] in ("AUTO_VERIFIED", "MANUAL_VERIFIED"))
+        needs_review = sum(1 for r in pdf_rows if len(r) >= 21 and r[20] == "NEEDS_REVIEW")
+        unlinked_answers = sum(1 for r in pdf_rows if len(r) >= 11 and r[5] == "Answer Sheet" and not r[10])
+
+        popularity = {}
+        for a in ana_rows:
+            if len(a) >= 7 and a[4] in ("VIEW", "SEND_CHAT", "QUIZ_SUBMIT"):
+                popularity[a[6]] = popularity.get(a[6], 0) + 1
+        top_docs = sorted(popularity.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        return cfg.get("LAUNCH_MODE", "OPEN_LAUNCH"), counts, len(stu_rows), total_refs, expiring_soon[:8], len(pdf_rows), len(key_rows), verified_links, needs_review, unlinked_answers, top_docs
+
+    launch_mode, counts, total_students, total_refs, upcoming, total_pdfs, total_keys, verified_links, needs_review, unlinked_ans, top_docs = await asyncio.to_thread(_gather)
+
+    lines = [
+        "<b>QELAL LEARNING — ADMIN STATS</b>\n",
+        f"<b>Mode:</b> <code>{launch_mode}</code> ({'/end_launch to gate' if launch_mode == 'OPEN_LAUNCH' else 'Paid/Approved Gated'})",
+        f"<b>Accounts:</b> {counts.get('APPROVED',0)} Approved | {counts.get('NEW',0)} Pending | {counts.get('EXPIRED',0)} Grace | {counts.get('LEFT',0)} Left",
+        f"<b>Total Enrolled Students:</b> {total_students} | <b>Referrals:</b> {total_refs}",
+        f"<b>Library:</b> {total_pdfs} Resources | {verified_links} Verified Links | {total_keys} Quiz Keys",
+        f"<b>Link Review Needed:</b> {needs_review} | <b>Unlinked Answers:</b> {unlinked_ans}\n",
+    ]
+    if upcoming:
+        lines.append("<b>Days Left (Closest Renewals):</b>")
+        for d_left, name, grade, st in upcoming:
+            badge = f"{d_left}d left" if d_left >= 0 else f"EXPIRED {-d_left}d ago"
+            lines.append(f"• {html.escape(name)} ({html.escape(grade)}): <b>{badge}</b> [{st}]")
+        lines.append("")
+    if top_docs:
+        lines.append("<b>Most Popular Resources:</b>")
+        for fname, hits in top_docs:
+            lines.append(f"• {html.escape(fname[:40])} — <b>{hits}</b> actions")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    raw = update.message.text.partition(" ")[2].strip()
+    if not raw:
+        await update.message.reply_text(
+            "<b>How to use /broadcast:</b>\n\n"
+            "• <code>/broadcast All Hello everyone, check the library!</code>\n"
+            "• <code>/broadcast Parents Bi-weekly progress reports are ready!</code>\n"
+            "• <code>/broadcast Grade 12 New 2018 Physics Model uploaded!</code>\n"
+            "• <code>/broadcast Grade 8 Ministry mock quiz added!</code>\n"
+            "• <code>/broadcast Natural Biology unit 4 notes added!</code>\n"
+            "• <code>/broadcast Social History notes updated!</code>\n"
+            "• <code>/broadcast Approved Class starts Saturday 2:30 LT.</code>\n"
+            "• <code>/broadcast New Call +251 933 510 682 to complete payment!</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    low = raw.lower()
+    target_label, filter_fn, message_text = "All Registered Accounts", (lambda row: True), raw
+    for prefix, label, fn in [
+        ("all ", "All Registered Accounts", lambda r: True),
+        ("parents ", "All Parents", lambda r: r[15].strip().lower() == "parent"),
+        ("approved ", "Approved Accounts", lambda r: r[4].strip().upper() in ("APPROVED", "EXPIRED")),
+        ("new ", "Pending (NEW) Accounts", lambda r: r[4].strip().upper() == "NEW"),
+        ("natural ", "Natural Science Students", lambda r: r[11].strip().lower() == "natural"),
+        ("social ", "Social Science Students", lambda r: r[11].strip().lower() == "social"),
+        ("grade 12 ", "Grade 12 Students", lambda r: r[2].strip() == "Grade 12"),
+        ("grade 11 ", "Grade 11 Students", lambda r: r[2].strip() == "Grade 11"),
+        ("grade 8 ", "Grade 8 Students", lambda r: r[2].strip() == "Grade 8"),
+        ("grade 6 ", "Grade 6 Students", lambda r: r[2].strip() == "Grade 6"),
+    ]:
+        if low.startswith(prefix):
+            target_label, filter_fn, message_text = label, fn, raw[len(prefix):].strip()
+            break
+
+    if not message_text:
+        await update.message.reply_text("Write a message after the target group.")
+        return
+
+    def _get_recipients():
+        reg_sheet, _ = get_sheets()
+        ids = []
+        for row in reg_sheet.get_all_values()[1:]:
+            r = row + [""] * (19 - len(row))
+            if r[6].strip() and filter_fn(r):
+                ids.append(int(r[6].strip()))
+        return list(dict.fromkeys(ids))
+
+    recipients = await asyncio.to_thread(_get_recipients)
+    if not recipients:
+        await update.message.reply_text(f"No accounts matched target: <b>{target_label}</b>", parse_mode="HTML")
+        return
+
+    bid = str(update.message.message_id)
+    PENDING_BROADCASTS[bid] = {"recipients": recipients, "text": message_text, "target": target_label}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"Send to {len(recipients)} Users", callback_data=f"bc_send:{bid}"),
+        InlineKeyboardButton("Cancel", callback_data=f"bc_cancel:{bid}"),
+    ]])
+    await update.message.reply_text(
+        f"<b>Broadcast Preview</b>\n<b>Target:</b> {target_label} ({len(recipients)} users)\n\n<i>{html.escape(message_text)}</i>",
+        reply_markup=kb, parse_mode="HTML",
+    )
+
+
+async def broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+    action, bid = query.data.split(":", 1)
+    payload = PENDING_BROADCASTS.pop(bid, None)
+    if action == "bc_cancel" or not payload:
+        await query.answer("Cancelled")
+        await query.edit_message_text("Broadcast cancelled.")
+        return
+
+    await query.answer("Sending...")
+    await query.edit_message_text(f"Sending to {len(payload['recipients'])} users...")
+    sent = failed = 0
+    formatted = f"<b>Announcement — Qelal Learning (ቀላል)</b>\n\n{html.escape(payload['text'])}"
+    for uid in payload["recipients"]:
+        try:
+            await context.bot.send_message(chat_id=uid, text=formatted, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    await query.edit_message_text(f"<b>Broadcast Complete.</b>\nTarget: {payload['target']}\nSent: {sent} | Failed: {failed}", parse_mode="HTML")
+
+
+async def download_doc_bytes_safe(http_client: httpx.AsyncClient, creds: Credentials, drive_pdf_id: str, telegram_file_id: str) -> bytes | None:
+    try:
+        if drive_pdf_id:
+            if not creds.valid:
+                await asyncio.to_thread(creds.refresh, GoogleAuthRequest())
+            url = f"https://www.googleapis.com/drive/v3/files/{drive_pdf_id}?alt=media&supportsAllDrives=true"
+            r = await http_client.get(url, headers={"Authorization": f"Bearer {creds.token}"})
+            if r.status_code == 200:
+                return r.content
+            logger.warning(f"Drive download HTTP {r.status_code} for {drive_pdf_id}")
+        if telegram_file_id:
+            tg_file = await ptb_app.bot.get_file(telegram_file_id)
+            f_url = tg_file.file_path if tg_file.file_path.startswith("http") else f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_file.file_path}"
+            r = await http_client.get(f_url)
+            if r.status_code == 200:
+                return r.content
+    except Exception as e:
+        logger.warning(f"Safe download failed ({drive_pdf_id or telegram_file_id}): {e}")
+    return None
+
+
+async def _run_verify_links_bg(status_msg, force: bool = False):
+    MAX_DOWNLOADS_PER_RUN = 40
+    try:
+        def _load():
+            _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
+            creds = get_credentials()
+            if not creds.valid:
+                creds.refresh(GoogleAuthRequest())
+            return pdf_sheet, keys_sheet, pdf_sheet.get_all_values(), keys_sheet.get_all_values(), creds
+
+        pdf_sheet, keys_sheet, pdf_rows, key_rows, creds = await asyncio.to_thread(_load)
+        by_id = {(row + [""] * (22 - len(row)))[0]: (idx, row + [""] * (22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
+        existing_key_ids = {r[0] for r in key_rows[1:] if r}
+
+        pdf_updates, new_keys = [], []
+        verified_count = rejected_count = review_count = embedded_keys_parsed = newly_discovered = 0
+        downloads_done = 0
+        reached_batch_limit = False
+        now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+        exam_cache, ans_cache = {}, {}
+
+        def _flush():
+            if pdf_updates:
+                for i in range(0, len(pdf_updates), 200):
+                    pdf_sheet.batch_update(pdf_updates[i : i + 200])
+                pdf_updates.clear()
+            if new_keys:
+                keys_sheet.append_rows(new_keys, value_input_option="USER_ENTERED")
+                new_keys.clear()
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+            async def get_exam_analysis(doc_id, r):
+                nonlocal downloads_done
+                if doc_id not in exam_cache:
+                    downloads_done += 1
+                    b = await download_doc_bytes_safe(http_client, creds, r[15], r[17])
+                    exam_cache[doc_id] = await asyncio.to_thread(analyze_exam_pdf, b) if b else None
+                return exam_cache[doc_id]
+
+            async def get_ans_analysis(doc_id, r):
+                nonlocal downloads_done
+                if doc_id not in ans_cache:
+                    downloads_done += 1
+                    b = await download_doc_bytes_safe(http_client, creds, r[15], r[17])
+                    ans_cache[doc_id] = await asyncio.to_thread(analyze_answer_pdf, b) if b else None
+                return ans_cache[doc_id]
+
+            processed_since_flush = 0
+
+            async def tick_checkpoint():
+                nonlocal processed_since_flush
+                processed_since_flush += 1
+                if processed_since_flush >= 8:
+                    processed_since_flush = 0
+                    await asyncio.to_thread(_flush)
+                    webapp_router.invalidate_library_cache()
+                    try:
+                        await status_msg.edit_text(
+                            f"Verifying PDFs in background...\n"
+                            f"Downloads: <b>{downloads_done}/{MAX_DOWNLOADS_PER_RUN}</b> | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+
+            for doc_id, (row_idx, r) in by_id.items():
+                if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                    reached_batch_limit = True
+                    break
+                cat, linked_id, link_status = r[5], r[10], r[20]
+                size_mb = float(r[13]) if r[13] else 0.0
+
+                if cat != "Answer Sheet" and linked_id and linked_id in by_id:
+                    if not force and link_status in ("AUTO_VERIFIED", "MANUAL_VERIFIED", "REJECTED_MISMATCH", "NEEDS_REVIEW") and (
+                        link_status not in ("AUTO_VERIFIED", "MANUAL_VERIFIED") or doc_id in existing_key_ids
+                    ):
+                        continue
+
+                    ans_row_idx, ans_r = by_id[linked_id]
+                    ans_size = float(ans_r[13]) if ans_r[13] else 0.0
+                    if size_mb > 25 or ans_size > 25:
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
+                        review_count += 1
+                        await tick_checkpoint()
+                        continue
+
+                    ex_info = await get_exam_analysis(doc_id, r)
+                    ans_info = await get_ans_analysis(linked_id, ans_r)
+                    if not ex_info or not ans_info:
+                        continue
+
+                    result = score_exam_answer_match(ex_info, ans_info, same_round_hint=(r[8] == ans_r[8]))
+                    if result["status"] == "AUTO_VERIFIED":
+                        verified_count += 1
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_row_idx}", "values": [["AUTO_VERIFIED"]]}])
+                        if result["answers"] and doc_id not in existing_key_ids:
+                            new_keys.append([doc_id, result["total_q"], json.dumps(result["sections"]), json.dumps(result["answers"]), linked_id, now_str])
+                            existing_key_ids.add(doc_id)
+                    elif result["status"] == "REJECTED_MISMATCH":
+                        rejected_count += 1
+                        r[10] = ""
+                        ans_r[10] = ""
+                        pdf_updates.extend([
+                            {"range": f"K{row_idx}", "values": [[""]]}, {"range": f"K{ans_row_idx}", "values": [[""]]},
+                            {"range": f"U{row_idx}", "values": [["REJECTED_MISMATCH"]]}, {"range": f"U{ans_row_idx}", "values": [["REJECTED_MISMATCH"]]},
+                        ])
+                    else:
+                        review_count += 1
+                        pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
+                    await tick_checkpoint()
+
+                elif r[11] == "Yes" and cat in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") and doc_id not in existing_key_ids and size_mb <= 25:
+                    if not force and link_status == "NEEDS_REVIEW":
+                        continue
+                    ex_info = await get_exam_analysis(doc_id, r)
+                    if ex_info:
+                        emb = ex_info.get("embedded_answers") or {}
+                        if len(emb) >= 15:
+                            new_keys.append([doc_id, max(int(k) for k in emb.keys()), json.dumps(ex_info.get("sections", [])), json.dumps(emb), doc_id, now_str])
+                            existing_key_ids.add(doc_id)
+                            embedded_keys_parsed += 1
+                        elif ex_info.get("is_scanned"):
+                            pdf_updates.append({"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]})
+                    await tick_checkpoint()
+
+            if not reached_batch_limit:
+                for ans_id, (ans_idx, ans_r) in by_id.items():
+                    if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                        reached_batch_limit = True
+                        break
+                    if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
+                        continue
+                    if not force and ans_r[20] in ("NEEDS_REVIEW", "REJECTED_MISMATCH"):
+                        continue
+
+                    ans_info = await get_ans_analysis(ans_id, ans_r)
+                    if not ans_info or ans_info.get("is_scanned") or ans_info.get("looks_like_question_paper"):
+                        pdf_updates.append({"range": f"U{ans_idx}", "values": [["NEEDS_REVIEW"]]})
+                        continue
+
+                    best_match = None
+                    for ex_id, (ex_idx, ex_r) in by_id.items():
+                        if downloads_done >= MAX_DOWNLOADS_PER_RUN:
+                            reached_batch_limit = True
+                            break
+                        if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
+                            continue
+                        if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):
+                            continue
+                        if ex_r[6] and ans_r[6] and ex_r[6] != ans_r[6]:
+                            continue
+                        if ex_r[7] and ans_r[7] and ex_r[7] != ans_r[7]:
+                            continue
+
+                        ex_info = await get_exam_analysis(ex_id, ex_r)
+                        if not ex_info:
+                            continue
+                        res = score_exam_answer_match(ex_info, ans_info, same_round_hint=(ex_r[8] == ans_r[8]))
+                        if res["status"] == "AUTO_VERIFIED":
+                            if not best_match or res["score"] > best_match[0]:
+                                best_match = (res["score"], ex_id, ex_idx, res)
+
+                    if best_match:
+                        _, ex_id, ex_idx, res = best_match
+                        by_id[ex_id][1][10] = ans_id
+                        ans_r[10] = ex_id
+                        newly_discovered += 1
+                        pdf_updates.extend([
+                            {"range": f"K{ex_idx}", "values": [[ans_id]]}, {"range": f"K{ans_idx}", "values": [[ex_id]]},
+                            {"range": f"U{ex_idx}", "values": [["AUTO_VERIFIED"]]}, {"range": f"U{ans_idx}", "values": [["AUTO_VERIFIED"]]},
+                        ])
+                        if res["answers"] and ex_id not in existing_key_ids:
+                            new_keys.append([ex_id, res["total_q"], json.dumps(res["sections"]), json.dumps(res["answers"]), ans_id, now_str])
+                            existing_key_ids.add(ex_id)
+                    else:
+                        pdf_updates.append({"range": f"U{ans_idx}", "values": [["NEEDS_REVIEW"]]})
+                    await tick_checkpoint()
+
+        await asyncio.to_thread(_flush)
+        webapp_router.invalidate_library_cache()
+
+        more_note = "\n\n<b>Batch limit reached (40 PDFs).</b> Run /verify_links again to continue the remaining files." if reached_batch_limit else ""
+        review_note = "\nSend /review_links to confirm scanned pairs." if review_count else ""
+
+        await status_msg.edit_text(
+            f"<b>PDF Content Verification Finished</b>\n\n"
+            f"<b>Auto-Verified:</b> {verified_count} (+{newly_discovered} matched by content)\n"
+            f"<b>False Links Removed:</b> {rejected_count}\n"
+            f"<b>Needs Review:</b> {review_count}\n"
+            f"<b>Total Quiz Keys Saved:</b> {len(existing_key_ids)} ({embedded_keys_parsed} embedded)"
+            f"{more_note}{review_note}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Background verify_links failed")
+        try:
+            await status_msg.edit_text(f"Verification stopped: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _BG_JOBS["verify"] = False
+
+
+async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    if _BG_JOBS["verify"]:
+        await update.message.reply_text("Verification is already running in the background—please wait.")
+        return
+
+    _BG_JOBS["verify"] = True
+    force = bool(context.args and context.args[0].lower() == "force")
+    status_msg = await update.message.reply_text("Starting background PDF verification (batch of 40 PDFs, checkpointing as it goes)...")
+    asyncio.create_task(_run_verify_links_bg(status_msg, force=force))
+
+
+async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    def _get_reviews():
+        _, pdf_sheet = get_sheets()
+        rows = pdf_sheet.get_all_values()[1:]
+        by_id = {r[0]: r for r in rows if r}
+        pairs = []
+        for r in rows:
+            padded = r + [""] * (22 - len(r))
+            if padded[20] == "NEEDS_REVIEW" and padded[5] != "Answer Sheet" and padded[10] in by_id:
+                pairs.append((padded, by_id[padded[10]] + [""] * (22 - len(by_id[padded[10]]))))
+        return pairs[:5]
+
+    pairs = await asyncio.to_thread(_get_reviews)
+    if not pairs:
+        await update.message.reply_text("No pairs waiting for manual review.")
+        return
+
+    for ex_r, ans_r in pairs:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Confirm Match", callback_data=f"link_ok:{ex_r[0]}:{ans_r[0]}"),
+            InlineKeyboardButton("Unlink", callback_data=f"link_no:{ex_r[0]}:{ans_r[0]}"),
+        ]])
+        await update.message.reply_text(
+            f"<b>Verify Link</b>\n<b>Exam ({ex_r[0]}):</b> {html.escape(ex_r[1])}\n<b>Answer ({ans_r[0]}):</b> {html.escape(ans_r[1])}",
+            reply_markup=kb, parse_mode="HTML",
+        )
+
+
+async def link_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ADMIN_USER_ID:
+        await query.answer("Unauthorized", show_alert=True)
+        return
+    action, ex_id, ans_id = query.data.split(":", 2)
+    await query.answer("Updating...")
+
+    def _apply():
+        _, pdf_sheet = get_sheets()
+        updates = []
+        for idx, r in enumerate(pdf_sheet.get_all_values()[1:], start=2):
+            if r and r[0] in (ex_id, ans_id):
+                if action == "link_ok":
+                    updates.append({"range": f"U{idx}", "values": [["MANUAL_VERIFIED"]]})
+                else:
+                    updates.extend([{"range": f"K{idx}", "values": [[""]]}, {"range": f"U{idx}", "values": [["REJECTED_MISMATCH"]]}])
+        if updates:
+            pdf_sheet.batch_update(updates)
+
+    await asyncio.to_thread(_apply)
+    webapp_router.invalidate_library_cache()
+    await query.edit_message_text(f"{'Link confirmed.' if action == 'link_ok' else 'Link removed.'} ({ex_id} / {ans_id})")
+
+
+async def convert_office_via_apps_script(drive_file_id: str) -> str | None:
+    if not CONVERTER_SCRIPT_URL:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            resp = await client.post(CONVERTER_SCRIPT_URL, json={"action": "convert_drive_file", "fileId": drive_file_id, "secret": CONVERTER_SECRET})
+            data = resp.json()
+            if data.get("ok") and data.get("pdfFileId"):
+                return data["pdfFileId"]
+    except Exception as e:
+        logger.warning(f"Converter error {drive_file_id}: {e}")
+    return None
+
+
+def compute_exam_answer_links(all_rows_with_headers: list[list[str]]):
+    if len(all_rows_with_headers) <= 1:
+        return []
+    exams_exact, exams_base, answers = {}, {}, []
+    for row_idx, row in enumerate(all_rows_with_headers[1:], start=2):
+        if len(row) < 12:
+            continue
+        doc_id, cat, link_key, linked_id, has_embedded = row[0], row[5], row[9], row[10], row[11]
+        if not link_key:
+            continue
+        parts = link_key.split("|")
+        base_key = "|".join(parts[:3]) if len(parts) >= 3 else link_key
+        if cat == "Answer Sheet":
+            answers.append((row_idx, doc_id, link_key, base_key, linked_id))
+        elif has_embedded == "No":
+            exams_exact.setdefault(link_key, []).append((row_idx, doc_id, linked_id))
+            exams_base.setdefault(base_key, []).append((row_idx, doc_id, linked_id))
+
+    updates = []
+    for ans_row_idx, ans_doc_id, ans_link_key, ans_base_key, ans_linked in answers:
+        if ans_linked:
+            continue
+        candidates = exams_exact.get(ans_link_key) or exams_base.get(ans_base_key)
+        if not candidates:
+            continue
+        ex_row_idx, ex_doc_id, ex_linked = candidates[0]
+        updates.append({"range": f"K{ans_row_idx}", "values": [[ex_doc_id]]})
+        if not ex_linked:
+            updates.append({"range": f"K{ex_row_idx}", "values": [[ans_doc_id]]})
+    return updates
+
+
+def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
+    results, folders_to_visit = [], [folder_id]
+    while folders_to_visit:
+        current_folder = folders_to_visit.pop(0)
+        page_token = None
+        while True:
+            resp = drive_service.files().list(
+                q=f"'{current_folder}' in parents and trashed = false",
+                fields="nextPageToken, files(id, name, mimeType, size, md5Checksum, parents)",
+                pageSize=1000, pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True,
+            ).execute()
+            for f in resp.get("files", []):
+                if f.get("mimeType") == "application/vnd.google-apps.folder":
+                    folders_to_visit.append(f["id"])
+                else:
+                    results.append(f)
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    return results
+
+
+async def _run_sync_drive_bg(status_msg):
+    try:
+        def _prepare_sync():
+            _, pdf_sheet = get_sheets()
+            return pdf_sheet, pdf_sheet.get_all_values(), list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID)
+
+        pdf_sheet, existing_rows, drive_files = await asyncio.to_thread(_prepare_sync)
+
+        existing_drive_ids, existing_unique_keys, stem_to_row_idx = set(), set(), {}
+        for idx, row in enumerate(existing_rows[1:], start=2):
+            if len(row) >= 16 and row[15]:
+                existing_drive_ids.add(row[15])
+            if len(row) >= 17 and row[16]:
+                existing_drive_ids.add(row[16])
+            if len(row) >= 19 and row[18]:
+                existing_unique_keys.add(row[18])
+            if len(row) >= 2:
+                stem_to_row_idx[normalize_stem(row[1])] = idx
+
+        grouped_files, seen_md5 = {}, set(existing_unique_keys)
+        skipped_excluded = skipped_duplicates = 0
+
+        for f in drive_files:
+            fname = f["name"]
+            excluded, _ = is_excluded_file(fname)
+            if excluded:
+                skipped_excluded += 1
+                continue
+            f_id, md5 = f["id"], f.get("md5Checksum") or f["id"]
+            if f_id in existing_drive_ids or md5 in seen_md5:
+                skipped_duplicates += 1
+                continue
+            seen_md5.add(md5)
+            stem = normalize_stem(fname)
+            ext = fname.rsplit(".", 1)[-1].lower()
+            grouped_files.setdefault(stem, {})
+            if ext not in grouped_files[stem]:
+                grouped_files[stem][ext] = f
+
+        converted_count = 0
+        if CONVERTER_SCRIPT_URL:
+            for stem, ext_map in grouped_files.items():
+                if "pdf" not in ext_map and ("pptx" in ext_map or "docx" in ext_map):
+                    office_file = ext_map.get("pptx") or ext_map.get("docx")
+                    new_pdf_id = await convert_office_via_apps_script(office_file["id"])
+                    if new_pdf_id:
+                        ext_map["pdf"] = {"id": new_pdf_id, "name": office_file["name"].rsplit(".", 1)[0] + ".pdf", "size": office_file.get("size", "0"), "md5Checksum": new_pdf_id}
+                        converted_count += 1
+
+        next_num, new_rows, twin_updates = len(existing_rows), [], []
+        for stem, ext_map in sorted(grouped_files.items()):
+            pdf_file, office_file = ext_map.get("pdf"), ext_map.get("pptx") or ext_map.get("docx")
+            if stem in stem_to_row_idx and office_file and not pdf_file:
+                twin_updates.append({"range": f"Q{stem_to_row_idx[stem]}", "values": [[office_file["id"]]]})
+                continue
+            primary = pdf_file or office_file
+            if not primary:
+                continue
+            meta = classify_material(primary["name"])
+            doc_id = f"DOC-{next_num:04d}"
+            next_num += 1
+            formats = [fmt for fmt, cond in [("PDF", pdf_file), ("PPTX", "pptx" in ext_map), ("DOCX", "docx" in ext_map)] if cond]
+            size_mb = round(int(primary.get("size") or 0) / (1024 * 1024), 2)
+            new_rows.append([
+                doc_id, primary["name"], meta["grade"], meta["stream"], meta["subject"],
+                meta["category"], meta["year"], meta["exam_tag"], meta["round_or_code"],
+                meta["link_key"], "", meta["has_embedded_answer"], " + ".join(formats),
+                size_mb, "Drive", pdf_file["id"] if pdf_file else "",
+                office_file["id"] if office_file else "", "", primary.get("md5Checksum") or primary["id"], "", "", "",
+            ])
+
+        def _write_and_link():
+            if twin_updates:
+                pdf_sheet.batch_update(twin_updates)
+            if new_rows:
+                for i in range(0, len(new_rows), 250):
+                    pdf_sheet.append_rows(new_rows[i : i + 250], value_input_option="USER_ENTERED")
+            link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
+            if link_updates:
+                pdf_sheet.batch_update(link_updates)
+            return len(link_updates) // 2
+
+        paired_count = await asyncio.to_thread(_write_and_link)
+        webapp_router.invalidate_library_cache()
+
+        await status_msg.edit_text(
+            f"<b>Google Drive Sync Complete</b>\n\n"
+            f"<b>Added:</b> {len(new_rows)} | <b>Converted:</b> {converted_count}\n"
+            f"<b>Candidate Pairs:</b> {paired_count} | <b>Duplicates:</b> {skipped_duplicates} | <b>Excluded:</b> {skipped_excluded}\n\n"
+            f"Run /verify_links next to verify PDF pairs &amp; parse Quiz keys.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Background sync_drive failed")
+        try:
+            await status_msg.edit_text(f"Drive sync failed: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _BG_JOBS["sync"] = False
+
+
+async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    if not DRIVE_FOLDER_ID:
+        await update.message.reply_text("<code>DRIVE_FOLDER_ID</code> is not set.", parse_mode="HTML")
+        return
+    if _BG_JOBS["sync"]:
+        await update.message.reply_text("Drive sync is already running in the background.")
+        return
+
+    _BG_JOBS["sync"] = True
+    status_msg = await update.message.reply_text("Scanning Google Drive folder in the background...")
+    asyncio.create_task(_run_sync_drive_bg(status_msg))
+
+
+async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = update.channel_post
+    if not post or not post.document or not post.document.file_name:
+        return
+    doc = post.document
+    excluded, _ = is_excluded_file(doc.file_name)
+    if excluded:
+        return
+
+    meta = classify_material(doc.file_name, post.caption or "")
+    ext = doc.file_name.rsplit(".", 1)[-1].upper()
+    size_mb = round((doc.file_size or 0) / (1024 * 1024), 2)
+    post_link = post.link if post.link else "Channel Document"
+
+    def _append_and_link():
+        _, pdf_sheet = get_sheets()
+        rows = pdf_sheet.get_all_values()
+        for r in rows[1:]:
+            if len(r) >= 19 and r[18] == doc.file_unique_id:
+                return None
+        doc_id = f"DOC-{len(rows):04d}"
+        pdf_sheet.append_row([
+            doc_id, doc.file_name, meta["grade"], meta["stream"], meta["subject"],
+            meta["category"], meta["year"], meta["exam_tag"], meta["round_or_code"],
+            meta["link_key"], "", meta["has_embedded_answer"], ext, size_mb,
+            "Telegram", "", "", doc.file_id, doc.file_unique_id, post_link, "", "",
+        ])
+        link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
+        if link_updates:
+            pdf_sheet.batch_update(link_updates)
+        return doc_id
+
+    await asyncio.to_thread(_append_and_link)
+    webapp_router.invalidate_library_cache()
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.warning(f"Telegram handler exception: {context.error}")
+
+
+# ==============================================================================
+# 7. FASTAPI APP, MINI APP ROUTER & LIFECYCLE
+# ==============================================================================
+ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
+
+webapp_router = create_webapp_router(
+    bot_token=BOT_TOKEN,
+    admin_user_id=ADMIN_USER_ID,
+    get_ptb_app=lambda: ptb_app,
+    get_bot_username=lambda: BOT_USERNAME,
+    get_all_worksheets_fn=get_all_worksheets,
+    get_credentials_fn=get_credentials,
+    eat_tz=EAT_TZ,
+)
+
+ptb_app.add_handler(CommandHandler("start", start_command))
+ptb_app.add_handler(CommandHandler("register", start_command))
+ptb_app.add_handler(CommandHandler("library", open_library_command))
+ptb_app.add_handler(CommandHandler("referral", referral_command))
+ptb_app.add_handler(CommandHandler("squad", referral_command))
+ptb_app.add_handler(CommandHandler("check_leads", check_leads))
+ptb_app.add_handler(CommandHandler("check_billing", check_billing_command))
+ptb_app.add_handler(CommandHandler("review_reports", review_reports_command))
+ptb_app.add_handler(CommandHandler("stats", stats_command))
+ptb_app.add_handler(CommandHandler("broadcast", broadcast_command))
+ptb_app.add_handler(CommandHandler("sync_drive", sync_drive_command))
+ptb_app.add_handler(CommandHandler("verify_links", verify_links_command))
+ptb_app.add_handler(CommandHandler("review_links", review_links_command))
+ptb_app.add_handler(CommandHandler("end_launch", end_launch_command))
+ptb_app.add_handler(CommandHandler("reopen_launch", reopen_launch_command))
+
+ptb_app.add_handler(CallbackQueryHandler(handle_student_action_callback, pattern=r"^(approve_user:|reject_user:|mark_paid:|mark_left:|approve_all_new)"))
+ptb_app.add_handler(CallbackQueryHandler(handle_report_decision, pattern=r"^rpt_"))
+ptb_app.add_handler(CallbackQueryHandler(broadcast_callback, pattern=r"^(bc_send:|bc_cancel:)"))
+ptb_app.add_handler(CallbackQueryHandler(link_review_callback, pattern=r"^(link_ok:|link_no:)"))
+ptb_app.add_handler(CallbackQueryHandler(launch_callback, pattern=r"^(launch_confirm:|launch_cancel)"))
+ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.ALL, auto_categorize_file))
+ptb_app.add_error_handler(telegram_error_handler)
+
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    global billing_task, BOT_USERNAME
+    await ptb_app.initialize()
+    await ptb_app.start()
+    try:
+        me = await ptb_app.bot.get_me()
+        BOT_USERNAME = me.username or BOT_USERNAME
+    except Exception as e:
+        logger.warning(f"getMe failed: {e}")
+
+    if WEBAPP_URL:
+        try:
+            await ptb_app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="Open Qelal", web_app=WebAppInfo(url=WEBAPP_URL))
+            )
+        except Exception as e:
+            logger.warning(f"Menu button error: {e}")
+
+    billing_task = asyncio.create_task(billing_scheduler_loop(ptb_app.bot))
+    yield
+
+    if billing_task:
+        billing_task.cancel()
+    await ptb_app.stop()
+    await ptb_app.shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(webapp_router)
+
+
+@app.post(f"/{BOT_TOKEN}")
+async def webhook(request: Request):
+    req_json = await request.json()
+    update = Update.de_json(req_json, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return Response(status_code=HTTPStatus.OK)
+
+
+@app.get("/")
+def index():
+    return {"status": "Qelal Learning (ቀላል) Bot is active!"}
