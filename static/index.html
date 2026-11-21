@@ -7,470 +7,389 @@
   <link rel="icon" href="/favicon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Ethiopic:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+Ethiopic:wght@400;500;600;700&family=Source+Serif+4:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
-<body oncontextmenu="return false;">
-
-  <!-- 1. Branded Loading Screen -->
-  <div id="splashView" class="splash-screen">
-    <div class="splash-mark">ቀላል</div>
-    <div class="splash-brand">QELAL LEARNING</div>
-    <p class="splash-sub">Bishoftu Study &amp; Exam Center · ቢሾፍቱ የጥናት ማዕከል</p>
-    <div class="splash-loader"><div class="splash-bar"></div></div>
-  </div>
-
-  <!-- 2. Outside Telegram / Connection Retry Notice -->
-  <div id="outsideView" class="gate-wrap hidden">
-    <div class="gate-card">
-      <div class="gate-icon-box">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
-      </div>
-      <h2 id="outsideTitle">Open inside Telegram</h2>
-      <p id="outsideMsg">Launch Qelal Learning from our Telegram bot to register and view your study materials.</p>
-      <button class="brass-btn" style="margin-top:16px;" onclick="window.location.reload()">Retry</button>
-    </div>
-  </div>
-
-  <!-- 3. In-App Trilingual Registration Wizard -->
-  <div id="onboardingView" class="onboard-wrap hidden">
-    <div class="onboard-top">
-      <div class="brand-mini">
-        <span class="brand-seal">ቀ</span>
-        <span>Qelal Learning</span>
-      </div>
-      <button id="onboardLangBtn" class="lang-btn">EN · አማ · OM</button>
-    </div>
-
-    <!-- Step 0: Language Choice -->
-    <div id="stepLang" class="wizard-card">
-      <p class="eyebrow">Bishoftu · Grades 1–12</p>
-      <h2>Choose your language<br /><span class="am-sub">ቋንቋ ይምረጡ · Afaan filadhu</span></h2>
-      <p class="muted-p">Switch between English, Amharic, or Afaan Oromoo anytime.</p>
-      <div class="choice-stack">
-        <button class="role-card" onclick="pickLanguage('en')">
-          <span class="role-code">EN</span>
-          <div><strong>English</strong><small>Study library, practice quizzes, and parent progress view</small></div>
-        </button>
-        <button class="role-card" onclick="pickLanguage('am')">
-          <span class="role-code">አማ</span>
-          <div><strong>አማርኛ (Amharic)</strong><small>መጽሐፍት፣ የፈተና ልምምድ እና የወላጅ መከታተያ</small></div>
-        </button>
-        <button class="role-card" onclick="pickLanguage('om')">
-          <span class="role-code">OM</span>
-          <div><strong>Afaan Oromoo</strong><small>Kitaabota, qormaata shaakalaa fi hordoffii maatii</small></div>
-        </button>
-      </div>
-    </div>
-
-    <!-- Step 1: Role Choice -->
-    <div id="stepRole" class="wizard-card hidden">
-      <h2 data-i18n="who_title">Who is registering?</h2>
-      <p class="muted-p" data-i18n="who_sub">Select your role so we can configure your dashboard and exam countdown.</p>
-      <div class="choice-stack">
-        <button class="role-card" onclick="pickRole('student')">
-          <span class="role-svg">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>
-          </span>
-          <div>
-            <strong data-i18n="role_student">Student</strong>
-            <small data-i18n="role_student_sub">Study library, timed bubble-sheet quizzes, study plans, and grade countdown</small>
-          </div>
-        </button>
-        <button class="role-card" onclick="pickRole('parent')">
-          <span class="role-svg">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-          </span>
-          <div>
-            <strong data-i18n="role_parent">Parent or Guardian</strong>
-            <small data-i18n="role_parent_sub">Child activity charts, progress reports, sibling discounts, and full library</small>
-          </div>
-        </button>
-      </div>
-      <div class="call-box">
-        <span data-i18n="prefer_call">Prefer to register by phone? Call us directly:</span>
-        <div><a href="tel:+251933510682">+251 933 510 682</a> · <a href="tel:+251988666328">+251 988 666 328</a></div>
-      </div>
-    </div>
-
-    <!-- Step 2: Registration Form -->
-    <div id="stepForm" class="wizard-card hidden">
-      <div class="form-head">
-        <button class="ghost-btn" onclick="goStep('stepRole')" data-i18n="back">Back</button>
-        <span id="formRoleTag" class="meta-label">Student</span>
-      </div>
-
-      <label class="field-lbl" id="lblFullName" data-i18n="lbl_student_name">Student Full Name</label>
-      <input id="regName" class="q-input" type="text" placeholder="Abebe Kebede" />
-
-      <label class="field-lbl" data-i18n="lbl_phone">Active Phone Number</label>
-      <input id="regPhone" class="q-input" type="tel" placeholder="+251 9..." />
-
-      <!-- Student Grade Grid -->
-      <div id="studentSingleFields">
-        <label class="field-lbl" data-i18n="lbl_grade">Grade Level (National exam grades marked)</label>
-        <div id="studentGradeGrid" class="grade-grid"></div>
-
-        <div id="studentStreamWrap" class="hidden">
-          <label class="field-lbl" data-i18n="lbl_stream">Academic Stream (Grades 11–12)</label>
-          <div class="stream-row">
-            <button type="button" class="stream-btn active" data-stream="Natural" onclick="setStudentStream('Natural')" data-i18n="stream_nat">Natural Science</button>
-            <button type="button" class="stream-btn" data-stream="Social" onclick="setStudentStream('Social')" data-i18n="stream_soc">Social Science</button>
-          </div>
+<body>
+  <div id="appShell" class="app-shell">
+    <!-- TOP MASTHEAD -->
+    <header id="appHeader" class="masthead hidden">
+      <div class="masthead-brand">
+        <div class="brand-stamp" aria-hidden="true">ቀ</div>
+        <div class="masthead-titles">
+          <div id="headerTitle" class="brand-name">Qelal Learning</div>
+          <div id="headerSub" class="brand-sub">Bishoftu Study &amp; Exam Hub</div>
         </div>
       </div>
-
-      <!-- Parent Multi-Child Builder -->
-      <div id="parentChildrenFields" class="hidden">
-        <div class="section-row">
-          <label class="field-lbl" style="margin:0;" data-i18n="lbl_children">Children</label>
-          <button type="button" id="addChildBtn" class="add-child-btn" data-i18n="add_child">+ Add Child</button>
-        </div>
-        <div id="siblingBanner" class="sibling-banner hidden" data-i18n="sibling_msg">
-          Sibling tuition discount applied for registering 2 or more children.
-        </div>
-        <div id="childrenList"></div>
-      </div>
-
-      <label class="field-lbl" data-i18n="lbl_format">Preferred Program</label>
-      <select id="regFormat" class="q-input">
-        <option value="Weekend Hub" data-i18n="fmt_weekend">Weekend Exam Cohort (Bishoftu Hub)</option>
-        <option value="1-on-1 Home" data-i18n="fmt_home">1-on-1 Home Mentorship</option>
-        <option value="Digital Library" data-i18n="fmt_digital">Digital Study Library Only</option>
-      </select>
-
-      <label class="field-lbl" data-i18n="lbl_ref">Referral Code (Optional)</label>
-      <input id="regRefCode" class="q-input" type="text" placeholder="QELAL-1A2B3" />
-
-      <p class="terms-note">
-        <span data-i18n="terms_agree">By submitting, you agree to our</span>
-        <button type="button" class="link-btn" onclick="openTermsModal()" data-i18n="terms_link">Program Terms &amp; Privacy</button>.
-      </p>
-
-      <button id="submitRegBtn" class="brass-btn" data-i18n="btn_submit_reg">Submit Registration</button>
-    </div>
-  </div>
-
-  <!-- 4. Main Authenticated App Shell -->
-  <div id="appShell" class="app-shell hidden">
-    <header class="app-header">
-      <div class="header-left">
-        <span class="brand-seal sm">ቀ</span>
-        <div style="min-width:0;">
-          <div class="hdr-name" id="hdrGreeting">Account</div>
-          <div class="hdr-meta" id="hdrMeta">Grade 12</div>
-        </div>
-      </div>
-      <div class="header-right">
-        <button id="appLangBtn" class="lang-btn">EN · አማ · OM</button>
-        <button id="hdrInviteBtn" class="hdr-ref-btn">
-          <span data-i18n="invite_short">Invite</span>
-          <span class="mono-num" id="hdrRefCount">0</span>
-        </button>
+      <div id="langBar" class="lang-switch" role="group" aria-label="Language">
+        <button type="button" class="lang-btn active" data-lang="en">EN</button>
+        <button type="button" class="lang-btn" data-lang="am">አማ</button>
+        <button type="button" class="lang-btn" data-lang="om">OM</button>
       </div>
     </header>
 
-    <!-- Tab: Parent Visual Activity & Progress Home -->
-    <section id="tabParentHome" class="tab-view hidden">
-      <div class="surface-card" id="parentStatusCard"></div>
-
-      <div class="block-head">
-        <h3 data-i18n="child_activity_title">Child Study Activity</h3>
+    <!-- LOADING SCREEN -->
+    <main id="screenLoading" class="screen-center">
+      <div class="loader-box">
+        <div class="brand-stamp brand-stamp-lg" aria-hidden="true">ቀ</div>
+        <p id="loadingText" class="muted-text">Opening Qelal Learning...</p>
       </div>
-      <div id="parentChildTabs" class="seg-tabs hidden"></div>
-      <div id="parentVisualDash"></div>
+    </main>
 
-      <div class="block-head" style="margin-top:16px;">
-        <h3 data-i18n="progress_reports">Bi-Weekly Coordinator Reports</h3>
-      </div>
-      <div id="parentReportsList"></div>
-    </section>
-
-    <!-- Tab: Study Library -->
-    <section id="tabLibrary" class="tab-view hidden">
-      <div id="countdownBanner" class="countdown-card hidden"></div>
-      <div id="modeBanner" class="mode-strip hidden"></div>
-
-      <button id="topQuizCta" class="quiz-cta-bar">
-        <div class="quiz-cta-left">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
+    <!-- OUTSIDE TELEGRAM / AUTH ERROR SCREEN -->
+    <main id="screenOutside" class="screen-single hidden">
+      <section class="panel">
+        <div class="panel-head">
+          <div class="brand-stamp" aria-hidden="true">ቀ</div>
           <div>
-            <strong data-i18n="quiz_cta_title">Practice Bubble-Sheet Quizzes</strong>
-            <small id="quizCtaSub">Timed past papers with automatic grading</small>
+            <h1 id="outsideTitle" class="h1-serif">Qelal Learning (ቀላል)</h1>
+            <p class="muted-text">Bishoftu Grades 1–12 Study &amp; Exam Portal</p>
           </div>
         </div>
-        <span class="cta-action" data-i18n="quiz_cta_go">Open</span>
-      </button>
-
-      <div class="search-box-wrap">
-        <input type="search" id="searchInput" class="q-input search" data-i18n-placeholder="search_ph" placeholder="Search exam, textbook, year..." />
-        <div class="filters-grid">
-          <select id="gradeFilter" class="q-select"></select>
-          <select id="streamFilter" class="q-select"></select>
-          <select id="subjectFilter" class="q-select"></select>
-          <select id="categoryFilter" class="q-select"></select>
+        <p id="outsideBody" class="body-copy">
+          This study portal opens inside Telegram so your reading progress, quizzes, and family account stay synced securely. Open the Qelal Learning bot in Telegram and send /start to launch it.
+        </p>
+        <p id="outsideDetail" class="error-inline hidden"></p>
+        <div class="btn-row">
+          <button type="button" id="outsideRetryBtn" class="btn btn-primary">Try again</button>
         </div>
-        <div class="count-row">
-          <span id="resultCount" class="mono-num">0 items</span>
-          <div>
-            <button id="refreshBtn" class="link-btn hidden" style="margin-right:12px;">Refresh</button>
-            <button id="clearFiltersBtn" class="link-btn" data-i18n="show_all">Show All Grades</button>
+        <div class="contact-strip">
+          <span>Bishoftu Support:</span>
+          <a href="tel:+251933510682">+251 933 510 682</a>
+          <span>·</span>
+          <a href="tel:+251988666328">+251 988 666 328</a>
+        </div>
+      </section>
+    </main>
+
+    <!-- REGISTRATION SCREEN -->
+    <main id="screenRegister" class="screen-single hidden">
+      <section class="panel">
+        <div class="reg-top">
+          <div class="masthead-brand">
+            <div class="brand-stamp" aria-hidden="true">ቀ</div>
+            <div>
+              <h1 id="regHeaderTitle" class="h1-serif">Qelal Learning (ቀላል)</h1>
+              <p id="regHeaderSub" class="muted-text">Bishoftu Study &amp; Exam Hub · Grades 1–12</p>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div id="cardList" class="card-stack"></div>
-      <button id="loadMoreBtn" class="load-more hidden">Show More</button>
-    </section>
-
-    <!-- Tab: Quiz Hub -->
-    <section id="tabQuiz" class="tab-view hidden">
-      <div class="section-intro">
-        <h3 data-i18n="quiz_hub_title">Mock Exams &amp; Bubble Sheets</h3>
-        <p id="quizHubHint" class="muted-p"></p>
-      </div>
-      <div id="quizHubList" class="card-stack"></div>
-    </section>
-
-    <!-- Tab: Study Plans -->
-    <section id="tabPlan" class="tab-view hidden">
-      <div class="section-intro">
-        <h3 data-i18n="plan_title">Study Plans &amp; Syllabi</h3>
-        <p class="muted-p" data-i18n="plan_sub">Follow a structured schedule or add your own daily tasks.</p>
-      </div>
-      <div id="studyPlanBody"></div>
-    </section>
-
-    <!-- Tab: Saved, Referral, Request & Legal -->
-    <section id="tabMore" class="tab-view hidden">
-      <div class="ledger-menu">
-        <button class="ledger-row" onclick="openReferralModal()">
-          <span><strong data-i18n="tile_ref">Study Squad Referral</strong><small data-i18n="tile_ref_sub">Share your code and track verified friends</small></span>
-          <span class="chev">›</span>
-        </button>
-        <button class="ledger-row" onclick="openRequestModal()">
-          <span><strong data-i18n="tile_req">Request Missing Material</strong><small data-i18n="tile_req_sub">Ask for a specific past paper or textbook</small></span>
-          <span class="chev">›</span>
-        </button>
-        <button class="ledger-row" onclick="openTermsModal()">
-          <span><strong data-i18n="terms_link">Program Terms &amp; Privacy</strong><small>30-day cycle, grace window, and reading policy</small></span>
-          <span class="chev">›</span>
-        </button>
-      </div>
-      <div id="savedBody"></div>
-    </section>
-
-    <!-- Tab: Admin Console (Visible Only to Admin) -->
-    <section id="tabAdmin" class="tab-view hidden">
-      <div class="section-intro">
-        <h3>Admin Console</h3>
-        <p class="muted-p">Manage student approvals, billing cycles, progress reports, and trial access.</p>
-      </div>
-      <div id="adminSummaryGrid" class="kpi-grid"></div>
-
-      <div class="seg-tabs" id="adminSubTabs">
-        <button class="seg-btn active" onclick="switchAdminSubTab('admStudents', this)">Accounts</button>
-        <button class="seg-btn" onclick="switchAdminSubTab('admReports', this)">Publish Report</button>
-        <button class="seg-btn" onclick="switchAdminSubTab('admBroadcast', this)">Broadcast</button>
-        <button class="seg-btn" onclick="switchAdminSubTab('admConfig', this)">Settings &amp; Trial</button>
-      </div>
-
-      <!-- Admin Sub 1: Students & Billing -->
-      <div id="admStudents" class="admin-sub">
-        <div class="filters-grid" style="margin-bottom:10px;">
-          <select id="admStatusFilter" class="q-select" onchange="renderAdminStudents()">
-            <option value="">All Statuses</option>
-            <option value="NEW">Pending (NEW)</option>
-            <option value="EXPIRED">Grace (EXPIRED)</option>
-            <option value="APPROVED">Active (APPROVED)</option>
-            <option value="LEFT">Inactive (LEFT)</option>
-          </select>
-          <input id="admSearchInput" class="q-input" style="padding:7px 10px;font-size:12px;" placeholder="Filter name or phone..." oninput="renderAdminStudents()" />
-        </div>
-        <div id="adminStudentList" class="card-stack"></div>
-      </div>
-
-      <!-- Admin Sub 2: Publish Bi-Weekly Progress Report -->
-      <div id="admReports" class="admin-sub hidden">
-        <div class="surface-card">
-          <label class="field-lbl" style="margin-top:0;">Student</label>
-          <select id="admRptStudent" class="q-input"></select>
-          <label class="field-lbl">Period</label>
-          <input id="admRptPeriod" class="q-input" placeholder="e.g. Nov 10 – Nov 24" />
-          <label class="field-lbl">Attendance</label>
-          <input id="admRptAttendance" class="q-input" placeholder="e.g. 4 / 4 Weekend Sessions" />
-          <label class="field-lbl">Quiz &amp; Class Scores</label>
-          <input id="admRptScores" class="q-input" placeholder="e.g. Math 86%, Physics 79%" />
-          <label class="field-lbl">What Improved</label>
-          <textarea id="admRptImproved" class="q-input" rows="2" placeholder="Mastered derivatives and word problems..."></textarea>
-          <label class="field-lbl">Next Focus</label>
-          <textarea id="admRptFocus" class="q-input" rows="2" placeholder="Organic chemistry unit 3 + 20 daily questions..."></textarea>
-          <button id="admPublishRptBtn" class="brass-btn" onclick="adminPublishReport()">Publish Report to Parent</button>
-        </div>
-      </div>
-
-      <!-- Admin Sub 3: Targeted Broadcast -->
-      <div id="admBroadcast" class="admin-sub hidden">
-        <div class="surface-card">
-          <label class="field-lbl" style="margin-top:0;">Target Audience</label>
-          <select id="admBcTarget" class="q-input">
-            <option value="all">All Registered Accounts</option>
-            <option value="parents">All Parents</option>
-            <option value="approved">Active / Approved Members</option>
-            <option value="new">Pending (NEW) Accounts</option>
-            <option value="grade_12">Grade 12 Students</option>
-            <option value="grade_8">Grade 8 Students</option>
-            <option value="grade_6">Grade 6 Students</option>
-            <option value="natural">Natural Science Stream</option>
-            <option value="social">Social Science Stream</option>
-          </select>
-          <label class="field-lbl">Message</label>
-          <textarea id="admBcMessage" class="q-input" rows="4" placeholder="Write announcement text..."></textarea>
-          <button id="admSendBcBtn" class="brass-btn" onclick="adminSendBroadcast()">Send Announcement</button>
-        </div>
-      </div>
-
-      <!-- Admin Sub 4: Launch Mode, Dates & Trial Picker -->
-      <div id="admConfig" class="admin-sub hidden">
-        <div class="surface-card">
-          <label class="field-lbl" style="margin-top:0;">Access Mode</label>
-          <select id="admLaunchMode" class="q-input">
-            <option value="OPEN_LAUNCH">OPEN_LAUNCH (Free for all registered users)</option>
-            <option value="PAID_GATED">PAID_GATED (3-book Trial for Pending/Left)</option>
-          </select>
-          <label class="field-lbl">Grade 12 ESSLCE Date</label>
-          <input id="admDateMatric" class="q-input" type="date" />
-          <label class="field-lbl">Grade 8 Ministry Date</label>
-          <input id="admDateG8" class="q-input" type="date" />
-          <label class="field-lbl">Grade 6 Ministry Date</label>
-          <input id="admDateG6" class="q-input" type="date" />
-          <label class="field-lbl">Semester Final Exam Date</label>
-          <input id="admDateSem" class="q-input" type="date" />
-          <button id="admSaveCfgBtn" class="brass-btn" onclick="adminSaveConfig()">Save Configuration</button>
+        <!-- 3-LANGUAGE SELECTION CARDS (EN / AM / OM) -->
+        <div class="field-group">
+          <label id="regLangLabel" class="field-label">Select your language</label>
+          <div id="regLangCards" class="lang-card-row" role="radiogroup" aria-label="Language selection">
+            <button type="button" class="lang-card active" data-lang="en">
+              <span class="lang-card-main">English</span>
+              <span class="lang-card-sub">EN</span>
+            </button>
+            <button type="button" class="lang-card" data-lang="am">
+              <span class="lang-card-main">አማርኛ</span>
+              <span class="lang-card-sub">AM</span>
+            </button>
+            <button type="button" class="lang-card" data-lang="om">
+              <span class="lang-card-main">Afaan Oromoo</span>
+              <span class="lang-card-sub">OM</span>
+            </button>
+          </div>
         </div>
 
-        <div class="surface-card">
-          <h4 style="margin-bottom:6px;">Manage Trial Preview Books (Is_Trial)</h4>
-          <p class="muted-p" style="margin-bottom:10px;">Search the library to mark which books remain accessible in Trial Mode.</p>
-          <input id="admTrialSearch" class="q-input" placeholder="Search book title..." oninput="renderAdminTrialPicker()" />
-          <div id="admTrialList" class="card-stack" style="margin-top:10px;"></div>
-        </div>
-      </div>
-    </section>
-
-    <nav id="bottomNav" class="bottom-nav"></nav>
-  </div>
-
-  <!-- Referral Modal -->
-  <div id="referralModal" class="modal-full hidden">
-    <div class="modal-head">
-      <button class="ghost-btn" onclick="closeModal('referralModal')" data-i18n="back">Back</button>
-      <h3 data-i18n="ref_modal_title">Study Squad Referral</h3>
-    </div>
-    <div class="modal-body">
-      <div class="surface-card">
-        <div class="muted-p" data-i18n="your_ref_code">Your Personal Referral Code</div>
-        <div id="myRefCodeDisplay" class="ref-code-box">QELAL-...</div>
-        <p class="muted-p" style="margin-bottom:12px;">
-          <span data-i18n="ref_verified_lbl">Verified Friends Joined:</span>
-          <strong id="myRefCountDisplay" class="mono-num" style="color:var(--primary);">0</strong> / 2
+        <p id="regIntroText" class="body-copy">
+          Register once to read textbooks and past national exams, check quiz answers automatically, and reserve a seat for weekend coaching or 1-on-1 home tutoring in Bishoftu.
         </p>
-        <div class="actions">
-          <button id="shareRefTgBtn" class="brass-btn" style="margin-top:0;" data-i18n="btn_share_tg">Share on Telegram</button>
-          <button id="copyRefCodeBtn" class="dark-btn" data-i18n="btn_copy_code">Copy Code</button>
+
+        <!-- ROLE SELECTOR -->
+        <div class="field-group">
+          <label id="regRolePrompt" class="field-label">Who is registering?</label>
+          <div class="role-toggle">
+            <button type="button" class="role-btn active" data-role="student">
+              <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+                <path d="M2 10l10-5 10 5-10 5-10-5z"/>
+                <path d="M6 12v5c3 2 9 2 12 0v-5"/>
+              </svg>
+              <span id="roleStudentText">Student</span>
+            </button>
+            <button type="button" class="role-btn" data-role="parent">
+              <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+              <span id="roleParentText">Parent / Guardian</span>
+            </button>
+          </div>
+        </div>
+
+        <form id="regForm" novalidate>
+          <div class="form-row-2">
+            <div class="field-group">
+              <label id="regNameLabel" for="regName" class="field-label">Full name</label>
+              <input id="regName" type="text" class="input" autocomplete="name" required />
+            </div>
+            <div class="field-group">
+              <label id="regPhoneLabel" for="regPhone" class="field-label">Phone number</label>
+              <input id="regPhone" type="tel" class="input" placeholder="09..." autocomplete="tel" required />
+            </div>
+          </div>
+
+          <!-- STUDENT PATH -->
+          <div id="regStudentBlock">
+            <div class="field-group">
+              <label id="regStudentGradeLabel" class="field-label">Grade level (1–12)</label>
+              <div id="regStudentGradeGrid" class="grade-grid"></div>
+            </div>
+
+            <div id="regStudentStreamBlock" class="field-group hidden">
+              <label id="regStudentStreamLabel" class="field-label">Academic stream</label>
+              <div id="regStudentStreamBtns" class="seg-row">
+                <button type="button" class="seg-btn active" data-stream="Natural">Natural Science</button>
+                <button type="button" class="seg-btn" data-stream="Social">Social Science</button>
+              </div>
+            </div>
+
+            <div class="field-group">
+              <label id="regStudentFormatLabel" class="field-label">Preferred study format</label>
+              <div id="regStudentFormatBtns" class="seg-row">
+                <button type="button" class="seg-btn active" data-format="Weekend Hub">Weekend Study Hub</button>
+                <button type="button" class="seg-btn" data-format="1-on-1 Home">1-on-1 Home Tutoring</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- PARENT PATH -->
+          <div id="regParentBlock" class="hidden">
+            <div class="field-group">
+              <label id="regParentFormatLabel" class="field-label">Default study format</label>
+              <div id="regParentFormatBtns" class="seg-row">
+                <button type="button" class="seg-btn active" data-format="Weekend Hub">Weekend Study Hub</button>
+                <button type="button" class="seg-btn" data-format="1-on-1 Home">1-on-1 Home Tutoring</button>
+              </div>
+            </div>
+
+            <div class="section-divider-head">
+              <h2 id="regChildrenHeading" class="h2-section">Children</h2>
+              <button type="button" id="btnAddChild" class="btn btn-secondary btn-sm">+ Add another child</button>
+            </div>
+
+            <div id="regSiblingBanner" class="notice-bar notice-pass hidden"></div>
+            <div id="regChildrenList" class="children-stack"></div>
+          </div>
+
+          <div class="field-group">
+            <label id="regRefLabel" for="regReferral" class="field-label">Referral or Study Squad code (optional)</label>
+            <input id="regReferral" type="text" class="input mono-input" placeholder="QELAL-XXXXX" />
+          </div>
+
+          <p id="regLegalAgreeWrap" class="legal-note">
+            <span id="regLegalPrefix">By registering, you agree to Qelal Learning's</span>
+            <button type="button" id="btnOpenTermsReg" class="link-btn">Enrollment Terms</button>
+            <span id="regLegalAnd">and</span>
+            <button type="button" id="btnOpenPrivacyReg" class="link-btn">Privacy Policy</button>.
+          </p>
+
+          <p id="regErrorMsg" class="error-inline hidden"></p>
+
+          <button type="submit" id="btnSubmitReg" class="btn btn-primary btn-block">
+            Complete registration
+          </button>
+        </form>
+      </section>
+    </main>
+
+    <!-- MAIN AUTHENTICATED PORTAL -->
+    <div id="screenPortal" class="portal-wrap hidden">
+      <nav id="mainNav" class="tab-nav" aria-label="Portal sections"></nav>
+
+      <!-- TAB: PARENT DASHBOARD -->
+      <section id="viewParent" class="tab-view hidden"></section>
+
+      <!-- TAB: STUDY LIBRARY -->
+      <section id="viewLibrary" class="tab-view hidden">
+        <div id="countdownCard" class="ledger-banner hidden"></div>
+        <div id="trialBanner" class="notice-bar notice-warn hidden"></div>
+
+        <div id="continueReadingSection" class="panel-compact hidden">
+          <h2 id="continueReadingTitle" class="h2-section">Continue reading</h2>
+          <div id="continueReadingList" class="compact-list"></div>
+        </div>
+
+        <div class="filter-bar">
+          <div class="search-row">
+            <svg class="ico search-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+            </svg>
+            <input id="libSearch" type="search" class="input search-input" placeholder="Search books, exams, subjects..." />
+          </div>
+          <div class="filter-controls">
+            <select id="filterGrade" class="select" aria-label="Filter by grade"></select>
+            <select id="filterSubject" class="select" aria-label="Filter by subject"></select>
+            <select id="filterCategory" class="select" aria-label="Filter by category"></select>
+            <button type="button" id="filterSavedBtn" class="btn btn-secondary btn-sm">Saved</button>
+          </div>
+          <div id="libCountText" class="meta-line"></div>
+        </div>
+
+        <div id="libList" class="ledger-list"></div>
+
+        <div class="panel-compact request-box">
+          <div class="request-head">
+            <span id="reqPromptText" class="muted-text">Missing a textbook or past paper?</span>
+            <button type="button" id="reqToggleBtn" class="link-btn">Request material</button>
+          </div>
+          <div id="reqBox" class="hidden">
+            <div class="form-row-2">
+              <div class="field-group">
+                <label id="reqSubjectLabel" for="reqSubject" class="field-label">Subject &amp; grade</label>
+                <input id="reqSubject" type="text" class="input" placeholder="e.g. Grade 12 Chemistry" />
+              </div>
+              <div class="field-group">
+                <label id="reqDetailsLabel" for="reqDetails" class="field-label">Book or exam details</label>
+                <input id="reqDetails" type="text" class="input" placeholder="e.g. 2015 ESSLCE Chemistry" />
+              </div>
+            </div>
+            <div class="btn-row">
+              <button type="button" id="reqSendBtn" class="btn btn-primary btn-sm">Send request</button>
+              <span id="reqStatusMsg" class="meta-line"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: STUDY PLANS -->
+      <section id="viewPlans" class="tab-view hidden">
+        <div id="plansTrialNote" class="notice-bar notice-warn hidden"></div>
+        <div id="plansList" class="stack-gap"></div>
+
+        <section class="panel-compact">
+          <h2 id="customPlanTitle" class="h2-section">Personal study checklist</h2>
+          <div class="custom-add-row">
+            <input id="customTaskInput" type="text" class="input" placeholder="Add a topic or revision task..." />
+            <button type="button" id="btnAddCustomTask" class="btn btn-primary btn-sm">Add</button>
+          </div>
+          <div id="customTaskList" class="task-list"></div>
+        </section>
+      </section>
+
+      <!-- TAB: ACCOUNT & SQUAD -->
+      <section id="viewAccount" class="tab-view hidden"></section>
+
+      <!-- TAB: ADMIN CONSOLE -->
+      <section id="viewAdmin" class="tab-view hidden"></section>
+
+      <footer class="app-footer">
+        <div class="footer-contacts">
+          <span>Qelal Learning · Bishoftu</span>
+          <span>·</span>
+          <a href="tel:+251933510682">+251 933 510 682</a>
+          <span>·</span>
+          <a href="tel:+251988666328">+251 988 666 328</a>
+        </div>
+        <div class="footer-links">
+          <button type="button" id="btnOpenTermsFooter" class="link-btn">Enrollment Terms</button>
+          <span>·</span>
+          <button type="button" id="btnOpenPrivacyFooter" class="link-btn">Privacy Policy</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- MODAL: IN-APP PDF READER -->
+  <div id="modalPdf" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pdfModalTitle">
+    <div class="modal-bar">
+      <div class="modal-title-wrap">
+        <h2 id="pdfModalTitle" class="modal-title">Document</h2>
+      </div>
+      <div class="modal-bar-actions">
+        <button type="button" id="btnPdfBookmark" class="btn btn-secondary btn-sm">Save</button>
+        <button type="button" id="btnPdfSendChat" class="btn btn-secondary btn-sm">Send to Chat</button>
+        <button type="button" id="btnPdfClose" class="btn btn-primary btn-sm">Close</button>
+      </div>
+    </div>
+    <div class="pdf-toolbar">
+      <div class="pdf-nav-group">
+        <button type="button" id="btnPdfPrev" class="btn btn-secondary btn-sm">Prev</button>
+        <span class="pdf-page-box">
+          <input id="pdfPageInput" type="number" min="1" value="1" class="page-num-input" aria-label="Page number" />
+          <span>/</span>
+          <span id="pdfPageTotal" class="mono-num">1</span>
+        </span>
+        <button type="button" id="btnPdfNext" class="btn btn-secondary btn-sm">Next</button>
+      </div>
+      <div class="pdf-nav-group">
+        <button type="button" id="btnPdfZoomOut" class="btn btn-secondary btn-sm">-</button>
+        <span id="pdfZoomLabel" class="mono-num">100%</span>
+        <button type="button" id="btnPdfZoomIn" class="btn btn-secondary btn-sm">+</button>
+      </div>
+    </div>
+    <div id="pdfViewport" class="pdf-viewport">
+      <div id="pdfStatusOverlay" class="pdf-status hidden"></div>
+      <canvas id="pdfCanvas" class="pdf-canvas"></canvas>
+      <iframe id="pdfFallbackFrame" class="pdf-iframe hidden" title="Document Viewer"></iframe>
+    </div>
+  </div>
+
+  <!-- MODAL: BUBBLE-SHEET QUIZ RUNNER -->
+  <div id="modalQuiz" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="quizModalTitle">
+    <div class="modal-bar">
+      <div class="modal-title-wrap">
+        <h2 id="quizModalTitle" class="modal-title">Practice Quiz</h2>
+        <span id="quizAnsweredCounter" class="meta-line mono-num">0 / 0</span>
+      </div>
+      <button type="button" id="btnQuizClose" class="btn btn-primary btn-sm">Close</button>
+    </div>
+
+    <div id="quizViewTabs" class="quiz-subnav hidden">
+      <button type="button" class="quiz-subtab active" data-pane="bubbles" id="tabQuizBubbles">Answer Bubbles</button>
+      <button type="button" class="quiz-subtab" data-pane="paper" id="tabQuizPaper">Exam Paper (PDF)</button>
+    </div>
+
+    <div class="quiz-body">
+      <div id="quizPdfPane" class="quiz-pdf-pane hidden">
+        <div id="quizPdfControls" class="pdf-toolbar">
+          <div class="pdf-nav-group">
+            <button type="button" id="btnQuizPdfPrev" class="btn btn-secondary btn-sm">Prev</button>
+            <span id="quizPdfPageLabel" class="mono-num">1 / 1</span>
+            <button type="button" id="btnQuizPdfNext" class="btn btn-secondary btn-sm">Next</button>
+          </div>
+          <div class="pdf-nav-group">
+            <button type="button" id="btnQuizPdfZoomOut" class="btn btn-secondary btn-sm">-</button>
+            <button type="button" id="btnQuizPdfZoomIn" class="btn btn-secondary btn-sm">+</button>
+          </div>
+        </div>
+        <div id="quizPdfViewport" class="pdf-viewport">
+          <div id="quizPdfStatus" class="pdf-status hidden"></div>
+          <canvas id="quizPdfCanvas" class="pdf-canvas"></canvas>
         </div>
       </div>
-      <div class="surface-card">
-        <h4 style="margin-bottom:6px;" data-i18n="ref_how_title">How Study Squad Perks Work</h4>
-        <p class="muted-p" data-i18n="ref_how_body">
-          Share your code with classmates in Bishoftu. Once two friends register and complete enrollment, you qualify for same-table Study Squad seating, a bound formula folder, and tuition savings.
-        </p>
+
+      <div id="quizBubblePane" class="quiz-bubble-pane">
+        <div id="quizMetaInfo" class="meta-line"></div>
+        <div id="quizTrialNote" class="notice-bar notice-warn hidden"></div>
+        <div id="quizBubblesList" class="bubble-list"></div>
+        <div id="quizSubmitBar" class="quiz-submit-bar">
+          <button type="button" id="btnQuizSubmit" class="btn btn-primary btn-block">Grade my answers</button>
+        </div>
+        <div id="quizResultPane" class="hidden"></div>
       </div>
     </div>
   </div>
 
-  <!-- Request Material Modal -->
-  <div id="requestModal" class="modal-full hidden">
-    <div class="modal-head">
-      <button class="ghost-btn" onclick="closeModal('requestModal')" data-i18n="back">Back</button>
-      <h3 data-i18n="req_modal_title">Request a Material</h3>
-    </div>
-    <div class="modal-body">
-      <div class="surface-card">
-        <p class="muted-p" style="margin-bottom:12px;" data-i18n="req_desc">Looking for a specific past paper, textbook, or answer key? Send a note to the academic team.</p>
-        <input id="reqSubject" class="q-input" style="margin-bottom:10px;" placeholder="Subject (e.g. Grade 8 Science / Grade 12 Math)" />
-        <textarea id="reqDetails" class="q-input" rows="4" placeholder="Exam year, unit, or textbook title..."></textarea>
-        <button id="submitReqBtn" class="brass-btn" data-i18n="btn_send_req">Send Request</button>
+  <!-- MODAL: LEGAL (TERMS OF ENROLLMENT & PRIVACY POLICY) -->
+  <div id="modalLegal" class="modal modal-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="legalModalTitle">
+    <div class="modal-sheet">
+      <div class="modal-bar">
+        <h2 id="legalModalTitle" class="modal-title">Enrollment Terms</h2>
+        <button type="button" id="btnLegalClose" class="btn btn-secondary btn-sm">Close</button>
       </div>
+      <div id="legalModalBody" class="legal-body"></div>
     </div>
   </div>
 
-  <!-- Program Terms & Privacy Modal -->
-  <div id="termsModal" class="modal-full hidden">
-    <div class="modal-head">
-      <button class="ghost-btn" onclick="closeModal('termsModal')" data-i18n="back">Back</button>
-      <h3>Program Terms &amp; Privacy</h3>
-    </div>
-    <div class="modal-body">
-      <div class="surface-card prose-card">
-        <h4>1. Registration &amp; Membership Cycle</h4>
-        <p>Qelal Learning operates on a 30-day monthly tuition cycle starting from enrollment approval. Families receive reminders before renewal and a 7-day grace period after day 30 before returning to the 3-book preview tier.</p>
-        <h4>2. Protected Study Materials</h4>
-        <p>All textbooks, exam papers, answer keys, and study guides inside the hub are provided solely for personal academic preparation by registered Qelal students and parents. External redistribution or commercial resale is prohibited.</p>
-        <h4>3. Student &amp; Parent Data</h4>
-        <p>Names, phone numbers, grade levels, and study activity metrics are stored strictly for seat coordination, bi-weekly parent progress reporting, and exam preparation support. Contact us at +251 933 510 682 or +251 988 666 328 to update or remove your records.</p>
-      </div>
-    </div>
-  </div>
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
 
-  <!-- Protected In-App PDF Reader + Bubble Sheet -->
-  <div id="readerModal" class="reader-modal hidden">
-    <div class="reader-header">
-      <button id="closeReaderBtn" class="r-btn" data-i18n="back">Back</button>
-      <div class="reader-title" id="readerTitle">Document</div>
-      <button id="toggleQuizBtn" class="r-btn quiz-toggle hidden">Bubble Sheet</button>
-      <button id="toggleAnswerBtn" class="r-btn answer-toggle hidden">Answer Key</button>
-    </div>
-    <div class="reader-toolbar">
-      <div class="page-controls">
-        <button id="prevPageBtn" class="r-btn">Prev</button>
-        <span class="mono-num"><input id="pageInput" class="page-input" type="number" min="1" value="1" /> / <span id="pageCount">?</span></span>
-        <button id="nextPageBtn" class="r-btn">Next</button>
-      </div>
-      <div class="page-controls">
-        <button id="zoomOutBtn" class="r-btn">−</button>
-        <span id="zoomLabel" class="mono-num">100%</span>
-        <button id="zoomInBtn" class="r-btn">+</button>
-      </div>
-    </div>
-
-    <div class="reader-canvas-wrap" id="canvasWrap">
-      <canvas id="pdfCanvas"></canvas>
-      <div id="readerLoading" class="reader-loading hidden">
-        <div class="mini-spinner"></div>
-        <span id="readerLoadText">Opening PDF...</span>
-      </div>
-    </div>
-
-    <div id="bubblePanel" class="bubble-panel hidden">
-      <div class="bubble-bar">
-        <span class="mono-num"><span id="bubbleAnsweredCount">0</span> / <span id="bubbleTotalCount">0</span> answered</span>
-        <span class="mono-num" id="quizTimerText">00:00</span>
-        <button id="submitQuizBtn" class="r-btn" style="background:var(--teal);">Submit &amp; Grade</button>
-      </div>
-      <div id="bubbleGrid" class="bubble-grid"></div>
-    </div>
-
-    <div class="reader-footer">
-      <button id="readerSendChatBtn" class="brass-btn" style="padding:9px;font-size:12px;" data-i18n="btn_offline_tg">
-        Save Offline in Telegram (Protected View)
-      </button>
-    </div>
-  </div>
-
-  <div id="toast" class="toast hidden"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>
