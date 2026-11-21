@@ -16,6 +16,7 @@ import httpx
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, Response, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
+from gspread.exceptions import APIError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
@@ -23,6 +24,21 @@ from study_plans import STUDY_PLAN_TEMPLATES
 from receipt_generator import generate_membership_pdf
 
 logger = logging.getLogger(__name__)
+
+
+def sheets_retry(fn, retries: int = 3):
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except APIError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (429, 500, 502, 503) or "429" in str(e):
+                if attempt < retries:
+                    delay = 2.0 * (2 ** attempt)
+                    logger.warning(f"Sheets API {code or 429} in webapp_api, retrying in {delay:.1f}s...")
+                    time.sleep(delay)
+                    continue
+            raise
 
 
 def normalize_phone(raw: str) -> str:
@@ -53,6 +69,12 @@ def create_webapp_router(
     boot_ver = str(int(time.time()))
     no_cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
+    reg_lock = asyncio.Lock()
+    lib_lock = asyncio.Lock()
+    cfg_lock = asyncio.Lock()
+    prog_lock = asyncio.Lock()
+    ana_lock = asyncio.Lock()
+
     state = {
         "creds": None,
         "lib_cache": None,
@@ -62,6 +84,10 @@ def create_webapp_router(
         "cfg_cache": None,
         "cfg_cache_ts": 0.0,
         "keys_cache": None,
+        "prog_cache": None,
+        "prog_cache_ts": 0.0,
+        "ana_cache": None,
+        "ana_cache_ts": 0.0,
         "analytics_buffer": [],
         "last_flush_ts": time.time(),
     }
@@ -69,16 +95,15 @@ def create_webapp_router(
     def invalidate_library_cache():
         state["lib_cache"] = None
         state["keys_cache"] = None
+        state["lib_cache_ts"] = 0.0
 
     def invalidate_reg_cache():
         state["reg_cache"] = None
+        state["reg_cache_ts"] = 0.0
 
     def invalidate_config_cache():
         state["cfg_cache"] = None
-
-    router.invalidate_library_cache = invalidate_library_cache
-    router.invalidate_reg_cache = invalidate_reg_cache
-    router.invalidate_config_cache = invalidate_config_cache
+        state["cfg_cache_ts"] = 0.0
 
     def get_drive_access_token() -> str:
         if state["creds"] is None:
@@ -123,10 +148,8 @@ def create_webapp_router(
         except Exception:
             return None
 
-    # --- CACHED LOADERS ---
-    def _load_config_sync() -> dict:
-        _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
-        rows = cfg_sheet.get_all_values()[1:]
+    # --- BATCHED + CACHED LOADERS ---
+    def _parse_config_rows(rows: list[list[str]]) -> dict:
         cfg = {
             "LAUNCH_MODE": "OPEN_LAUNCH",
             "MATRIC_DATE": "2027-06-25",
@@ -134,36 +157,58 @@ def create_webapp_router(
             "GRADE6_MINISTRY_DATE": "2027-06-10",
             "SEMESTER_DATE": "2027-01-25",
         }
-        for r in rows:
+        for r in rows[1:]:
             if len(r) >= 2 and r[0].strip():
                 cfg[r[0].strip()] = r[1].strip()
         return cfg
 
+    def _load_config_sync() -> dict:
+        _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
+        rows = sheets_retry(cfg_sheet.get_all_values)
+        return _parse_config_rows(rows)
+
     async def get_config() -> dict:
         now = time.time()
-        if state["cfg_cache"] is None or (now - state["cfg_cache_ts"] > 60):
+        if state["cfg_cache"] is not None and (now - state["cfg_cache_ts"] < 300):
+            return state["cfg_cache"]
+        async with cfg_lock:
+            now = time.time()
+            if state["cfg_cache"] is not None and (now - state["cfg_cache_ts"] < 300):
+                return state["cfg_cache"]
             state["cfg_cache"] = await asyncio.to_thread(_load_config_sync)
-            state["cfg_cache_ts"] = now
-        return state["cfg_cache"]
+            state["cfg_cache_ts"] = time.time()
+            return state["cfg_cache"]
 
     def _load_reg_and_students_sync():
-        reg_sheet, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets_fn()
-        reg_rows = reg_sheet.get_all_values()[1:]
-        stu_rows = students_sheet.get_all_values()[1:]
-        rpt_rows = reports_sheet.get_all_values()[1:]
+        reg_sheet, *_ = get_all_worksheets_fn()
+        batch = sheets_retry(
+            lambda: reg_sheet.spreadsheet.values_batch_get([
+                "Registrations!A:S",
+                "Students!A:K",
+                "Progress_Reports!A:J",
+                "Config!A:B",
+            ])
+        )
+        vrs = batch.get("valueRanges", [])
+        reg_all = vrs[0].get("values", []) if len(vrs) > 0 else []
+        stu_all = vrs[1].get("values", []) if len(vrs) > 1 else []
+        rpt_all = vrs[2].get("values", []) if len(vrs) > 2 else []
+        cfg_all = vrs[3].get("values", []) if len(vrs) > 3 else []
+
+        reg_rows = reg_all[1:]
+        stu_rows = stu_all[1:]
+        rpt_rows = rpt_all[1:]
 
         by_tg = {}
         all_regs = []
+        ref_updates = []
         for idx, row in enumerate(reg_rows, start=2):
-            r = row + [""] * (19 - len(row))
+            r = row + [""] * max(0, 19 - len(row))
             if r[6].strip():
                 ref_code = r[12].strip()
                 if not ref_code:
                     ref_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-                    try:
-                        reg_sheet.update_cell(idx, 13, ref_code)
-                    except Exception:
-                        pass
+                    ref_updates.append({"range": f"M{idx}", "values": [[ref_code]]})
                 rec = {
                     "row_idx": idx,
                     "id": r[0],
@@ -188,12 +233,18 @@ def create_webapp_router(
                 by_tg[r[6].strip()] = rec
                 all_regs.append(rec)
 
+        if ref_updates:
+            try:
+                sheets_retry(lambda: reg_sheet.batch_update(ref_updates))
+            except Exception:
+                pass
+
         children_by_parent = {}
         child_by_tg = {}
         student_by_id = {}
         all_students = []
         for idx, row in enumerate(stu_rows, start=2):
-            s = row + [""] * (11 - len(row))
+            s = row + [""] * max(0, 11 - len(row))
             if not s[0]:
                 continue
             stu_obj = {
@@ -218,7 +269,7 @@ def create_webapp_router(
 
         approved_reports_by_stu = {}
         for row in rpt_rows:
-            rp = row + [""] * (10 - len(row))
+            rp = row + [""] * max(0, 10 - len(row))
             if rp[7].strip().lower() == "approved" and rp[1]:
                 approved_reports_by_stu.setdefault(rp[1], []).append({
                     "report_id": rp[0],
@@ -234,7 +285,7 @@ def create_webapp_router(
                     "tutor_name": rp[9],
                 })
 
-        return {
+        bundle = {
             "by_tg": by_tg,
             "all_regs": all_regs,
             "all_students": all_students,
@@ -243,13 +294,30 @@ def create_webapp_router(
             "student_by_id": student_by_id,
             "reports_by_stu": approved_reports_by_stu,
         }
+        cfg = _parse_config_rows(cfg_all) if cfg_all else None
+        return bundle, cfg
 
     async def get_reg_bundle() -> dict:
         now = time.time()
-        if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 30):
-            state["reg_cache"] = await asyncio.to_thread(_load_reg_and_students_sync)
-            state["reg_cache_ts"] = now
-        return state["reg_cache"]
+        if state["reg_cache"] is not None and (now - state["reg_cache_ts"] < 180):
+            return state["reg_cache"]
+        async with reg_lock:
+            now = time.time()
+            if state["reg_cache"] is not None and (now - state["reg_cache_ts"] < 180):
+                return state["reg_cache"]
+            bundle, cfg = await asyncio.to_thread(_load_reg_and_students_sync)
+            now_done = time.time()
+            state["reg_cache"] = bundle
+            state["reg_cache_ts"] = now_done
+            if cfg is not None and state["cfg_cache"] is None:
+                state["cfg_cache"] = cfg
+                state["cfg_cache_ts"] = now_done
+            return state["reg_cache"]
+
+    router.invalidate_library_cache = invalidate_library_cache
+    router.invalidate_reg_cache = invalidate_reg_cache
+    router.invalidate_config_cache = invalidate_config_cache
+    router.get_reg_bundle = get_reg_bundle
 
     async def get_user_access(tg_id: int) -> dict:
         bundle = await get_reg_bundle()
@@ -334,13 +402,15 @@ def create_webapp_router(
         return {"date": cfg.get("SEMESTER_DATE", "2027-01-25"), "type": "semester"}
 
     def _load_library_and_keys_sync():
-        _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets_fn()
-        pdf_rows = pdf_sheet.get_all_values()[1:]
-        key_rows = keys_sheet.get_all_values()[1:]
+        _, pdf_sheet, *_ = get_all_worksheets_fn()
+        batch = sheets_retry(lambda: pdf_sheet.spreadsheet.values_batch_get(["PDF_Library!A:V", "Exam_Keys!A:F"]))
+        vrs = batch.get("valueRanges", [])
+        pdf_rows = (vrs[0].get("values", []) if len(vrs) > 0 else [])[1:]
+        key_rows = (vrs[1].get("values", []) if len(vrs) > 1 else [])[1:]
 
         keys_by_id = {}
         for kr in key_rows:
-            k = kr + [""] * (6 - len(kr))
+            k = kr + [""] * max(0, 6 - len(kr))
             if k[0]:
                 try:
                     keys_by_id[k[0]] = {
@@ -355,7 +425,7 @@ def create_webapp_router(
         for idx, row in enumerate(pdf_rows, start=2):
             if not row or not row[0]:
                 continue
-            r = row + [""] * (22 - len(row))
+            r = row + [""] * max(0, 22 - len(row))
             item = {
                 "row_idx": idx, "doc_id": r[0], "file_name": r[1], "grade": r[2],
                 "stream": r[3], "subject": r[4], "category": r[5], "year": r[6],
@@ -374,12 +444,66 @@ def create_webapp_router(
 
     async def get_library_and_keys():
         now = time.time()
-        if state["lib_cache"] is None or (now - state["lib_cache_ts"] > 300):
+        if state["lib_cache"] is not None and (now - state["lib_cache_ts"] < 900):
+            return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
+        async with lib_lock:
+            now = time.time()
+            if state["lib_cache"] is not None and (now - state["lib_cache_ts"] < 900):
+                return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
             items, by_id, keys_by_id = await asyncio.to_thread(_load_library_and_keys_sync)
             state["lib_cache"] = (items, by_id)
             state["keys_cache"] = keys_by_id
-            state["lib_cache_ts"] = now
-        return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
+            state["lib_cache_ts"] = time.time()
+            return items, by_id, keys_by_id
+
+    def _load_progress_all_sync() -> dict:
+        _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
+        rows = sheets_retry(prog_sheet.get_all_values)
+        by_tg = {}
+        for idx, row in enumerate(rows[1:], start=2):
+            r = row + [""] * max(0, 6 - len(row))
+            if r[0].strip():
+                try:
+                    by_tg[r[0].strip()] = {
+                        "row_idx": idx,
+                        "data": {
+                            "bookmarks": json.loads(r[1]) if r[1] else [],
+                            "last_read": json.loads(r[2]) if r[2] else {},
+                            "plan_progress": json.loads(r[3]) if r[3] else {},
+                            "custom_plan": json.loads(r[4]) if r[4] else [],
+                        },
+                    }
+                except Exception:
+                    pass
+        return by_tg
+
+    async def get_progress_map() -> dict:
+        now = time.time()
+        if state["prog_cache"] is not None and (now - state["prog_cache_ts"] < 300):
+            return state["prog_cache"]
+        async with prog_lock:
+            now = time.time()
+            if state["prog_cache"] is not None and (now - state["prog_cache_ts"] < 300):
+                return state["prog_cache"]
+            state["prog_cache"] = await asyncio.to_thread(_load_progress_all_sync)
+            state["prog_cache_ts"] = time.time()
+            return state["prog_cache"]
+
+    def _load_analytics_sync() -> list[list[str]]:
+        _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
+        return sheets_retry(analytics_sheet.get_all_values)[1:]
+
+    async def get_analytics_rows() -> list[list[str]]:
+        now = time.time()
+        if state["ana_cache"] is not None and (now - state["ana_cache_ts"] < 180):
+            return state["ana_cache"]
+        async with ana_lock:
+            now = time.time()
+            if state["ana_cache"] is not None and (now - state["ana_cache_ts"] < 180):
+                return state["ana_cache"]
+            state["ana_cache"] = await asyncio.to_thread(_load_analytics_sync)
+            state["ana_cache_ts"] = time.time()
+            return state["ana_cache"]
 
     def get_trial_doc_ids(items: list[dict], grade: str, stream: str) -> set[str]:
         grade_matches = [
@@ -441,7 +565,7 @@ def create_webapp_router(
 
     def _flush_analytics_sync(rows: list[list[str]]):
         _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
-        analytics_sheet.append_rows(rows, value_input_option="USER_ENTERED")
+        sheets_retry(lambda: analytics_sheet.append_rows(rows, value_input_option="USER_ENTERED"))
 
     async def log_analytics(tg_id: int, access: dict, action: str, doc_id: str, file_name: str, subject: str, score: str = ""):
         ts = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
@@ -455,6 +579,8 @@ def create_webapp_router(
             state["last_flush_ts"] = time.time()
             try:
                 await asyncio.to_thread(_flush_analytics_sync, batch)
+                if state["ana_cache"] is not None:
+                    state["ana_cache"].extend(batch)
             except Exception as e:
                 logger.warning(f"Analytics flush error: {e}")
 
@@ -481,54 +607,39 @@ def create_webapp_router(
     # ==========================================================================
     # AUTO-LINKING HELPERS (PARENT <-> CHILD BY USERNAME OR PHONE)
     # ==========================================================================
-    def _try_auto_link_child_on_auth_sync(tg_id: int, tg_username: str):
+    def _try_auto_link_child_on_auth_sync(tg_id: int, tg_username: str, bundle: dict):
         if not tg_username:
             return None
-        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets_fn()
-        stu_rows = students_sheet.get_all_values()
         matched_stu = None
-        for idx, row in enumerate(stu_rows[1:], start=2):
-            s = row + [""] * (11 - len(row))
-            if not s[6].strip() and normalize_username(s[7]) == tg_username and s[5].strip() != str(tg_id):
-                students_sheet.update_cell(idx, 7, str(tg_id))
+        for s in bundle["all_students"]:
+            if not s["child_tg_id"] and normalize_username(s["child_contact"]) == tg_username and s["parent_tg_id"] != str(tg_id):
                 matched_stu = s
                 break
         if not matched_stu:
             return None
 
-        parent_tg = matched_stu[5].strip()
-        reg_rows = reg_sheet.get_all_values()
-        parent_rec = None
-        already_reg = False
-        for rr in reg_rows[1:]:
-            rp = rr + [""] * (19 - len(rr))
-            if rp[6].strip() == parent_tg:
-                parent_rec = rp
-            if rp[6].strip() == str(tg_id):
-                already_reg = True
+        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets_fn()
+        sheets_retry(lambda: students_sheet.update_cell(matched_stu["row_idx"], 7, str(tg_id)))
 
-        if not already_reg:
+        parent_tg = matched_stu["parent_tg_id"]
+        if str(tg_id) not in bundle["by_tg"]:
+            p_rec = bundle["by_tg"].get(parent_tg, {})
             my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-            ts = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
-            p_status = parent_rec[4] if parent_rec else "NEW"
-            p_app = parent_rec[7] if parent_rec else ""
-            p_exp = parent_rec[8] if parent_rec else ""
-            p_lang = parent_rec[17] if parent_rec and parent_rec[17] in ("en", "am", "om") else "en"
-            reg_sheet.append_row([
-                max(1, len(reg_rows)), matched_stu[1], matched_stu[2], "", p_status, ts, str(tg_id),
-                p_app, p_exp, "0", "-1", matched_stu[3], my_code, "", "0", "student", matched_stu[4], p_lang, tg_username,
-            ])
-        return parent_tg, matched_stu[1], matched_stu[2]
+            ts = datetime.now(EAT_TZ if hasattr(globals(), "EAT_TZ") else eat_tz).strftime("%Y-%m-%d %H:%M")
+            next_id = max(1, len(bundle["all_regs"]) + 1)
+            sheets_retry(lambda: reg_sheet.append_row([
+                next_id, matched_stu["student_name"], matched_stu["grade"], "", p_rec.get("status", "NEW"),
+                ts, str(tg_id), p_rec.get("approved_at", ""), p_rec.get("expires_on", ""), "0", "-1",
+                matched_stu["stream"], my_code, "", "0", "student", matched_stu["format"],
+                p_rec.get("lang", "en"), tg_username,
+            ]))
+        return parent_tg, matched_stu["student_name"], matched_stu["grade"]
 
-    def _sync_username_sync(tg_id: int, tg_username: str):
+    def _sync_username_sync(row_idx: int, tg_username: str):
         if not tg_username:
             return
-        reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
-        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
-            r = row + [""] * (19 - len(row))
-            if r[6].strip() == str(tg_id) and normalize_username(r[18]) != tg_username:
-                reg_sheet.update_cell(idx, 19, tg_username)
-                return
+        reg_sheet, *_ = get_all_worksheets_fn()
+        sheets_retry(lambda: reg_sheet.update_cell(row_idx, 19, tg_username))
 
     # ==========================================================================
     # PUBLIC / STUDENT / PARENT ROUTES
@@ -567,10 +678,11 @@ def create_webapp_router(
 
             tg_id = int(user["id"])
             tg_username = normalize_username(user.get("username", ""))
+            bundle = await get_reg_bundle()
             access = await get_user_access(tg_id)
 
             if not access["registered"] and not access["is_admin"] and tg_username:
-                linked_info = await asyncio.to_thread(_try_auto_link_child_on_auth_sync, tg_id, tg_username)
+                linked_info = await asyncio.to_thread(_try_auto_link_child_on_auth_sync, tg_id, tg_username, bundle)
                 if linked_info:
                     invalidate_reg_cache()
                     access = await get_user_access(tg_id)
@@ -585,11 +697,10 @@ def create_webapp_router(
                         except Exception:
                             pass
             elif access["registered"] and tg_username:
-                bundle = await get_reg_bundle()
                 existing_rec = bundle["by_tg"].get(str(tg_id))
                 if existing_rec and existing_rec.get("username") != tg_username:
-                    await asyncio.to_thread(_sync_username_sync, tg_id, tg_username)
-                    invalidate_reg_cache()
+                    await asyncio.to_thread(_sync_username_sync, existing_rec["row_idx"], tg_username)
+                    existing_rec["username"] = tg_username
 
             if not access["registered"] and not access["is_admin"]:
                 return {"ok": False, "status": "NOT_REGISTERED", "tg_first_name": user.get("first_name", "")}
@@ -660,14 +771,19 @@ def create_webapp_router(
             timestamp = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
 
             def _write_registration():
-                reg_sheet, _, _, _, cfg_sheet, _, students_sheet, _ = get_all_worksheets_fn()
-                reg_rows = reg_sheet.get_all_values()
-                stu_rows = students_sheet.get_all_values()
+                reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets_fn()
+                batch = sheets_retry(
+                    lambda: reg_sheet.spreadsheet.values_batch_get(["Registrations!A:S", "Students!A:K", "Config!A:B"])
+                )
+                vrs = batch.get("valueRanges", [])
+                reg_rows = vrs[0].get("values", []) if len(vrs) > 0 else []
+                stu_rows = vrs[1].get("values", []) if len(vrs) > 1 else []
+                cfg_rows = vrs[2].get("values", []) if len(vrs) > 2 else []
 
                 valid_ref_code, referrer_name = "", ""
                 if entered_ref:
                     for rr in reg_rows[1:]:
-                        rp = rr + [""] * (19 - len(rr))
+                        rp = rr + [""] * max(0, 19 - len(rr))
                         if rp[12].strip().upper() == entered_ref and rp[6].strip() != str(tg_id):
                             valid_ref_code = entered_ref
                             referrer_name = rp[1]
@@ -675,7 +791,7 @@ def create_webapp_router(
 
                 next_id = max(1, len(reg_rows))
                 launch_mode = "OPEN_LAUNCH"
-                for cr in cfg_sheet.get_all_values()[1:]:
+                for cr in cfg_rows[1:]:
                     if len(cr) >= 2 and cr[0].strip() == "LAUNCH_MODE":
                         launch_mode = cr[1].strip()
 
@@ -686,7 +802,7 @@ def create_webapp_router(
                     matched_stu_s = None
 
                     for s_idx, s_row in enumerate(stu_rows[1:], start=2):
-                        s = s_row + [""] * (11 - len(s_row))
+                        s = s_row + [""] * max(0, 11 - len(s_row))
                         if s[6].strip() or not s[5].strip() or s[5].strip() == str(tg_id):
                             continue
                         c_phone_norm = normalize_phone(s[7])
@@ -705,38 +821,38 @@ def create_webapp_router(
                     if matched_parent_row_idx:
                         p_status, p_app, p_exp = "NEW", "", ""
                         for rr in reg_rows[1:]:
-                            rp = rr + [""] * (19 - len(rr))
+                            rp = rr + [""] * max(0, 19 - len(rr))
                             if rp[6].strip() == matched_parent_tg:
                                 p_status = rp[4].strip().upper() or "NEW"
                                 p_app = rp[7]
                                 p_exp = rp[8]
                                 break
 
-                        students_sheet.update(
+                        sheets_retry(lambda: students_sheet.update(
                             values=[[full_name, matched_stu_s[2], matched_stu_s[3], matched_stu_s[4], matched_parent_tg, str(tg_id), phone]],
                             range_name=f"B{matched_parent_row_idx}:H{matched_parent_row_idx}",
-                        )
-                        reg_sheet.append_row([
+                        ))
+                        sheets_retry(lambda: reg_sheet.append_row([
                             next_id, full_name, matched_stu_s[2], phone, p_status, timestamp, str(tg_id),
                             p_app, p_exp, "0", "-1", matched_stu_s[3], my_ref_code, valid_ref_code, "0",
                             "student", matched_stu_s[4], lang, tg_username,
-                        ])
+                        ]))
                         return {
                             "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": False,
                             "created_children": [{"student_name": full_name, "grade": matched_stu_s[2], "stream": matched_stu_s[3], "child_contact": phone, "link_token": "", "auto_linked": True}],
                             "launch_mode": launch_mode, "linked_parent_tg": matched_parent_tg, "linked_child_tgs": [],
                         }
 
-                    reg_sheet.append_row([
+                    sheets_retry(lambda: reg_sheet.append_row([
                         next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
                         "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
                         "student", ch_fmt, lang, tg_username,
-                    ])
+                    ]))
                     stu_id = f"STU-{uuid.uuid4().hex[:6].upper()}"
-                    students_sheet.append_row([
+                    sheets_retry(lambda: students_sheet.append_row([
                         stu_id, full_name, grade_val, stream_val, ch_fmt,
                         "", str(tg_id), phone, "", "NO", timestamp,
-                    ])
+                    ]))
                     return {
                         "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": False,
                         "created_children": [{"student_name": full_name, "grade": grade_val, "stream": stream_val, "child_contact": phone, "link_token": "", "auto_linked": False}],
@@ -747,16 +863,16 @@ def create_webapp_router(
                 grade_val = children[0].get("grade", "Grade 12") if len(children) == 1 else f"Parent ({len(children)} kids)"
                 stream_val = children[0].get("stream", "General") if len(children) == 1 else "General"
 
-                reg_sheet.append_row([
+                sheets_retry(lambda: reg_sheet.append_row([
                     next_id, full_name, grade_val, phone, "NEW", timestamp, str(tg_id),
                     "", "", "0", "-1", stream_val, my_ref_code, valid_ref_code, "0",
                     "parent", prog_format, lang, tg_username,
-                ])
+                ]))
 
                 stu_reg_by_phone = {}
                 stu_reg_by_user = {}
                 for rr in reg_rows[1:]:
-                    rp = rr + [""] * (19 - len(rr))
+                    rp = rr + [""] * max(0, 19 - len(rr))
                     r_tg = rp[6].strip()
                     if not r_tg or r_tg == str(tg_id):
                         continue
@@ -769,7 +885,7 @@ def create_webapp_router(
 
                 stu_existing_by_child_tg = {}
                 for s_idx, s_row in enumerate(stu_rows[1:], start=2):
-                    s = s_row + [""] * (11 - len(s_row))
+                    s = s_row + [""] * max(0, 11 - len(s_row))
                     if s[6].strip():
                         stu_existing_by_child_tg[s[6].strip()] = (s_idx, s)
 
@@ -812,9 +928,9 @@ def create_webapp_router(
                         })
 
                 if stu_batch_updates:
-                    students_sheet.batch_update(stu_batch_updates)
+                    sheets_retry(lambda: students_sheet.batch_update(stu_batch_updates))
                 if stu_rows_to_add:
-                    students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED")
+                    sheets_retry(lambda: students_sheet.append_rows(stu_rows_to_add, value_input_option="USER_ENTERED"))
 
                 return {
                     "valid_ref": valid_ref_code, "ref_name": referrer_name, "sibling_disc": has_sibling_discount,
@@ -892,16 +1008,16 @@ def create_webapp_router(
         tg_id, _ = await require_session(request)
         body = await request.json()
         lang = body.get("lang") if body.get("lang") in ("en", "am", "om") else "en"
+        bundle = await get_reg_bundle()
+        rec = bundle["by_tg"].get(str(tg_id))
 
-        def _update():
-            reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
-            for idx, r in enumerate(reg_sheet.get_all_values()[1:], start=2):
-                if len(r) >= 7 and r[6].strip() == str(tg_id):
-                    reg_sheet.update_cell(idx, 18, lang)
-                    return
+        if rec:
+            def _update():
+                reg_sheet, *_ = get_all_worksheets_fn()
+                sheets_retry(lambda: reg_sheet.update_cell(rec["row_idx"], 18, lang))
 
-        await asyncio.to_thread(_update)
-        invalidate_reg_cache()
+            await asyncio.to_thread(_update)
+            rec["lang"] = lang
         return {"ok": True, "lang": lang}
 
     @router.get("/api/library")
@@ -1053,8 +1169,8 @@ def create_webapp_router(
                 item["telegram_file_id"] = new_tg_id
 
                 def _save_tg_id():
-                    _, pdf_sheet, _, _, _, _, _, _ = get_all_worksheets_fn()
-                    pdf_sheet.update_cell(item["row_idx"], 18, new_tg_id)
+                    _, pdf_sheet, *_ = get_all_worksheets_fn()
+                    sheets_retry(lambda: pdf_sheet.update_cell(item["row_idx"], 18, new_tg_id))
 
                 await asyncio.to_thread(_save_tg_id)
 
@@ -1134,21 +1250,11 @@ def create_webapp_router(
     @router.get("/api/progress")
     async def api_get_progress(request: Request):
         tg_id, _ = await require_session(request)
-
-        def _load():
-            _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            for row in prog_sheet.get_all_values()[1:]:
-                r = row + [""] * (6 - len(row))
-                if r[0].strip() == str(tg_id):
-                    return {
-                        "bookmarks": json.loads(r[1]) if r[1] else [],
-                        "last_read": json.loads(r[2]) if r[2] else {},
-                        "plan_progress": json.loads(r[3]) if r[3] else {},
-                        "custom_plan": json.loads(r[4]) if r[4] else [],
-                    }
-            return {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []}
-
-        return {"ok": True, **(await asyncio.to_thread(_load))}
+        prog_map = await get_progress_map()
+        entry = prog_map.get(str(tg_id))
+        if entry:
+            return {"ok": True, **entry["data"]}
+        return {"ok": True, "bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []}
 
     @router.post("/api/progress")
     async def api_save_progress(request: Request):
@@ -1156,21 +1262,39 @@ def create_webapp_router(
         body = await request.json()
         now_str = datetime.now(eat_tz).strftime("%Y-%m-%d %H:%M")
 
+        prog_data = {
+            "bookmarks": body.get("bookmarks", []),
+            "last_read": body.get("last_read", {}),
+            "plan_progress": body.get("plan_progress", {}),
+            "custom_plan": body.get("custom_plan", []),
+        }
+        new_row = [
+            str(tg_id),
+            json.dumps(prog_data["bookmarks"]),
+            json.dumps(prog_data["last_read"]),
+            json.dumps(prog_data["plan_progress"]),
+            json.dumps(prog_data["custom_plan"]),
+            now_str,
+        ]
+
+        prog_map = await get_progress_map()
+        entry = prog_map.get(str(tg_id))
+
         def _save():
             _, _, _, _, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            rows = prog_sheet.get_all_values()
-            new_row = [
-                str(tg_id), json.dumps(body.get("bookmarks", [])),
-                json.dumps(body.get("last_read", {})), json.dumps(body.get("plan_progress", {})),
-                json.dumps(body.get("custom_plan", [])), now_str,
-            ]
-            for idx, row in enumerate(rows[1:], start=2):
-                if row and row[0].strip() == str(tg_id):
-                    prog_sheet.update(values=[new_row], range_name=f"A{idx}:F{idx}")
-                    return
-            prog_sheet.append_row(new_row)
+            if entry and entry.get("row_idx"):
+                r_idx = entry["row_idx"]
+                sheets_retry(lambda: prog_sheet.update(values=[new_row], range_name=f"A{r_idx}:F{r_idx}"))
+                return r_idx
+            resp = sheets_retry(lambda: prog_sheet.append_row(new_row, value_input_option="USER_ENTERED"))
+            upd_range = (resp or {}).get("updates", {}).get("updatedRange", "")
+            m = re.search(r"!(?:[A-Z]+)(\d+):", upd_range)
+            return int(m.group(1)) if m else None
 
-        await asyncio.to_thread(_save)
+        async with prog_lock:
+            saved_idx = await asyncio.to_thread(_save)
+            prog_map[str(tg_id)] = {"row_idx": saved_idx, "data": prog_data}
+
         return {"ok": True}
 
     @router.post("/api/request-material")
@@ -1206,26 +1330,9 @@ def create_webapp_router(
         if not children and access.get("role") != "parent":
             return {"ok": True, "children_analytics": []}
 
-        def _load_raw():
-            _, _, _, analytics_sheet, _, prog_sheet, _, _ = get_all_worksheets_fn()
-            return analytics_sheet.get_all_values()[1:], prog_sheet.get_all_values()[1:]
-
-        ana_sheet_rows, prog_rows = await asyncio.to_thread(_load_raw)
+        ana_sheet_rows = await get_analytics_rows()
+        prog_map = await get_progress_map()
         all_ana_rows = ana_sheet_rows + list(state["analytics_buffer"])
-
-        prog_by_tg = {}
-        for pr in prog_rows:
-            p = pr + [""] * (6 - len(pr))
-            if p[0].strip():
-                try:
-                    prog_by_tg[p[0].strip()] = {
-                        "bookmarks": json.loads(p[1]) if p[1] else [],
-                        "last_read": json.loads(p[2]) if p[2] else {},
-                        "plan_progress": json.loads(p[3]) if p[3] else {},
-                        "custom_plan": json.loads(p[4]) if p[4] else [],
-                    }
-                except Exception:
-                    pass
 
         today = datetime.now(eat_tz).date()
         last_7_days = [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
@@ -1238,14 +1345,15 @@ def create_webapp_router(
             inv_url = f"https://t.me/{bot_user}?start={ch['link_token']}" if (bot_user and ch["link_token"]) else ""
 
             child_events = [r for r in all_ana_rows if len(r) >= 8 and target_tg and str(r[1]).strip() == target_tg]
-            child_prog = prog_by_tg.get(target_tg, {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []})
+            prog_entry = prog_map.get(target_tg)
+            child_prog = prog_entry["data"] if prog_entry else {"bookmarks": [], "last_read": {}, "plan_progress": {}, "custom_plan": []}
 
             unique_docs_viewed, total_views, offline_saved = set(), 0, 0
             quiz_trend, subj_map = [], {}
             daily_counts = {d: 0 for d in last_7_days}
 
             for ev in child_events:
-                e = ev + [""] * (9 - len(ev))
+                e = ev + [""] * max(0, 9 - len(ev))
                 ts_str, _, _, _, action, doc_id, fname, subject, score_str = e[:9]
                 day_str = ts_str[:10]
                 if day_str in daily_counts:
@@ -1434,10 +1542,10 @@ def create_webapp_router(
         today = datetime.now(eat_tz).date()
 
         def _apply():
-            reg_sheet, _, _, _, _, _, _, _ = get_all_worksheets_fn()
-            rows = reg_sheet.get_all_values()
+            reg_sheet, *_ = get_all_worksheets_fn()
+            rows = sheets_retry(reg_sheet.get_all_values)
             for idx, row in enumerate(rows[1:], start=2):
-                r = row + [""] * (19 - len(row))
+                r = row + [""] * max(0, 19 - len(row))
                 if r[6].strip() == tg_id_str:
                     if action in ("approve", "mark_paid"):
                         is_renewal = action == "mark_paid"
@@ -1454,28 +1562,28 @@ def create_webapp_router(
                         app_at = r[7] if (is_renewal and r[7]) else today.isoformat()
                         exp_str = new_expires.isoformat()
                         ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-                        reg_sheet.update(
+                        sheets_retry(lambda: reg_sheet.update(
                             values=[[
                                 "APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0",
                                 r[11] or "General", ref_code, r[13], r[14] or "0",
                                 r[15] or "student", r[16] or "Weekend Hub", r[17] or "en", r[18],
                             ]],
                             range_name=f"E{idx}:S{idx}",
-                        )
+                        ))
                         credit_info = None
                         referred_by = r[13].strip().upper()
                         if prev_months == 0 and referred_by:
                             for r_idx, r_row in enumerate(rows[1:], start=2):
-                                rr = r_row + [""] * (19 - len(r_row))
+                                rr = r_row + [""] * max(0, 19 - len(r_row))
                                 if rr[12].strip().upper() == referred_by and rr[6].strip() != tg_id_str:
                                     nc = (int(rr[14]) if rr[14].isdigit() else 0) + 1
-                                    reg_sheet.update_cell(r_idx, 15, str(nc))
+                                    sheets_retry(lambda ri=r_idx, v=str(nc): reg_sheet.update_cell(ri, 15, v))
                                     credit_info = (int(rr[6].strip()), rr[1], referred_by, nc, r[1])
                                     break
                         return {"row": r, "ref_code": ref_code, "months": new_months, "exp": exp_str, "is_renewal": is_renewal, "credit": credit_info}
 
                     new_status = "LEFT" if action == "mark_left" else "REJECTED"
-                    reg_sheet.update_cell(idx, 5, new_status)
+                    sheets_retry(lambda: reg_sheet.update_cell(idx, 5, new_status))
                     return {"row": r, "new_status": new_status}
             return None
 
@@ -1549,10 +1657,10 @@ def create_webapp_router(
 
         def _save_report():
             _, _, _, _, _, _, _, reports_sheet = get_all_worksheets_fn()
-            reports_sheet.append_row([
+            sheets_retry(lambda: reports_sheet.append_row([
                 rpt_id, student_id, period, attendance, scores_text,
                 improved_note, focus_note, "Approved", now_str, tutor_name,
-            ])
+            ]))
 
         await asyncio.to_thread(_save_report)
         invalidate_reg_cache()
@@ -1585,7 +1693,7 @@ def create_webapp_router(
 
         def _update_cfg():
             _, _, _, _, cfg_sheet, _, _, _ = get_all_worksheets_fn()
-            rows = cfg_sheet.get_all_values()
+            rows = sheets_retry(cfg_sheet.get_all_values)
             key_to_row = {r[0].strip(): idx for idx, r in enumerate(rows[1:], start=2) if r and r[0].strip()}
             mapping = {
                 "LAUNCH_MODE": body.get("LAUNCH_MODE"),
@@ -1604,9 +1712,9 @@ def create_webapp_router(
                 else:
                     appends.append([k, val])
             if updates:
-                cfg_sheet.batch_update(updates)
+                sheets_retry(lambda: cfg_sheet.batch_update(updates))
             if appends:
-                cfg_sheet.append_rows(appends, value_input_option="USER_ENTERED")
+                sheets_retry(lambda: cfg_sheet.append_rows(appends, value_input_option="USER_ENTERED"))
 
         await asyncio.to_thread(_update_cfg)
         invalidate_config_cache()
@@ -1624,8 +1732,8 @@ def create_webapp_router(
             raise HTTPException(status_code=404, detail="Document not found")
 
         def _set_trial():
-            _, pdf_sheet, _, _, _, _, _, _ = get_all_worksheets_fn()
-            pdf_sheet.update_cell(item["row_idx"], 22, "YES" if is_trial else "")
+            _, pdf_sheet, *_ = get_all_worksheets_fn()
+            sheets_retry(lambda: pdf_sheet.update_cell(item["row_idx"], 22, "YES" if is_trial else ""))
 
         await asyncio.to_thread(_set_trial)
         invalidate_library_cache()
