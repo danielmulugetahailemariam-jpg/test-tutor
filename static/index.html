@@ -7,9 +7,9 @@
   <link rel="icon" href="/favicon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Ethiopic:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Noto+Sans+Ethiopic:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer></script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body oncontextmenu="return false;">
@@ -22,7 +22,7 @@
     <div class="splash-loader"><div class="splash-bar"></div></div>
   </div>
 
-  <!-- 2. Outside Telegram Notice -->
+  <!-- 2. Outside Telegram / Connection Retry Notice -->
   <div id="outsideView" class="gate-wrap hidden">
     <div class="gate-card">
       <div class="gate-icon-box">
@@ -30,24 +30,25 @@
       </div>
       <h2 id="outsideTitle">Open inside Telegram</h2>
       <p id="outsideMsg">Launch Qelal Learning from our Telegram bot to register and view your study materials.</p>
+      <button class="brass-btn" style="margin-top:16px;" onclick="window.location.reload()">Retry</button>
     </div>
   </div>
 
-  <!-- 3. In-App Bilingual Registration Wizard -->
+  <!-- 3. In-App Trilingual Registration Wizard -->
   <div id="onboardingView" class="onboard-wrap hidden">
     <div class="onboard-top">
       <div class="brand-mini">
         <span class="brand-seal">ቀ</span>
         <span>Qelal Learning</span>
       </div>
-      <button id="onboardLangBtn" class="lang-btn">EN / አማ</button>
+      <button id="onboardLangBtn" class="lang-btn">EN · አማ · OM</button>
     </div>
 
     <!-- Step 0: Language Choice -->
     <div id="stepLang" class="wizard-card">
       <p class="eyebrow">Bishoftu · Grades 1–12</p>
-      <h2>Choose your language<br /><span class="am-sub">ቋንቋ ይምረጡ</span></h2>
-      <p class="muted-p">You can switch between English and Amharic anytime inside the app.</p>
+      <h2>Choose your language<br /><span class="am-sub">ቋንቋ ይምረጡ · Afaan filadhu</span></h2>
+      <p class="muted-p">Switch between English, Amharic, or Afaan Oromoo anytime.</p>
       <div class="choice-stack">
         <button class="role-card" onclick="pickLanguage('en')">
           <span class="role-code">EN</span>
@@ -56,6 +57,10 @@
         <button class="role-card" onclick="pickLanguage('am')">
           <span class="role-code">አማ</span>
           <div><strong>አማርኛ (Amharic)</strong><small>መጽሐፍት፣ የፈተና ልምምድ እና የወላጅ መከታተያ</small></div>
+        </button>
+        <button class="role-card" onclick="pickLanguage('om')">
+          <span class="role-code">OM</span>
+          <div><strong>Afaan Oromoo</strong><small>Kitaabota, qormaata shaakalaa fi hordoffii maatii</small></div>
         </button>
       </div>
     </div>
@@ -159,7 +164,7 @@
         </div>
       </div>
       <div class="header-right">
-        <button id="appLangBtn" class="lang-btn">EN | አማ</button>
+        <button id="appLangBtn" class="lang-btn">EN · አማ · OM</button>
         <button id="hdrInviteBtn" class="hdr-ref-btn">
           <span data-i18n="invite_short">Invite</span>
           <span class="mono-num" id="hdrRefCount">0</span>
@@ -370,7 +375,7 @@
         <div id="myRefCodeDisplay" class="ref-code-box">QELAL-...</div>
         <p class="muted-p" style="margin-bottom:12px;">
           <span data-i18n="ref_verified_lbl">Verified Friends Joined:</span>
-          <strong id="myRefCountDisplay" class="mono-num" style="color:var(--brass);">0</strong> / 2
+          <strong id="myRefCountDisplay" class="mono-num" style="color:var(--primary);">0</strong> / 2
         </p>
         <div class="actions">
           <button id="shareRefTgBtn" class="brass-btn" style="margin-top:0;" data-i18n="btn_share_tg">Share on Telegram</button>
