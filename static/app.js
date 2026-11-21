@@ -34,7 +34,7 @@ const ICONS = {
   starFilled: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.9"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
 };
 
-// ================= BILINGUAL STRINGS (ENGLISH / AMHARIC) =================
+// ================= TRILINGUAL STRINGS (EN / AMHARIC / AFAAN OROMOO) =================
 const I18N = {
   en: {
     who_title: "Who is registering?",
@@ -156,9 +156,73 @@ const I18N = {
     launch_banner: "የመክፈቻ ጊዜ: ሁሉም የተመዘገቡ ተማሪዎች ሙሉውን የጥናት ማዕከል በነጻ መጠቀም ይችላሉ።",
     trial_banner: "የሙከራ አገልግሎት: 3 መጽሐፍት እና 10 ጥያቄዎች ተከፍተዋል። ምዝገባዎ ሲጸድቅ ሁሉም ይከፈታል።",
   },
+  om: {
+    who_title: "Eenyutu galmaa'aa jira?",
+    who_sub: "Daashboordii fi lakkoofsa guyyaa qormaataa sirreessuuf gahee keessan filadhaa.",
+    role_student: "Barataa",
+    role_student_sub: "Kitaabota, qormaata shaakalaa, karoora qo'annoo fi lakkoofsa guyyaa qormaataa",
+    role_parent: "Maatii / Guddistuu",
+    role_parent_sub: "Chaatii sochii barataa, gabaasa bu'aa, hir'ina kaffaltii obbolaa fi kitaabota guutuu",
+    prefer_call: "Bilbilaan galmaa'uu filattuu? Kallattiin bilbilaa:",
+    back: "Duubatti",
+    lbl_student_name: "Maqaa Guutuu Barataa",
+    lbl_parent_name: "Maqaa Guutuu Maatii / Guddistuu",
+    lbl_phone: "Lakkoofsa Bilbilaa",
+    lbl_grade: "Kutaa Filadhaa",
+    lbl_stream: "Damee Barnootaa (Kutaa 11–12)",
+    stream_nat: "Saayinsii Uumamaa (Natural)",
+    stream_soc: "Saayinsii Hawaasaa (Social)",
+    lbl_children: "Ijoollee Keessan",
+    add_child: "+ Mucaa Biraa Dabali",
+    sibling_msg: "Ijoollee 2 fi isaa ol galmeessuudhaan hir'ina kaffaltii obbolaa argattaniittu.",
+    lbl_format: "Sagantaa Filattan",
+    fmt_weekend: "Koorsii Sanbataa (Wiirtuu Bishooftuu)",
+    fmt_home: "Gargaarsa Manaa 1-on-1",
+    fmt_digital: "Mana Kitaabaa Diijitaalaa Qofa",
+    lbl_ref: "Koodii Afeerraa (Dirqama Miti)",
+    terms_agree: "Galmaa'uudhaan kan itti waliigaltan:",
+    terms_link: "Seera Sagantaa fi Iccitii",
+    btn_submit_reg: "Galmee Xumuri",
+    invite_short: "Afeeri",
+    child_activity_title: "Sochii Qo'annoo Mucaa",
+    progress_reports: "Gabaasa Torban Lamaa",
+    quiz_cta_title: "Qormaata Shaakali — Bubble Sheet",
+    quiz_cta_go: "Bani",
+    search_ph: "Qormaata, kitaaba, bara barbaadi...",
+    show_all: "Kutaa Hunda Agarsiisi",
+    quiz_hub_title: "Qormaata Fakkeenyaa fi Sirreeffama",
+    plan_title: "Karoora Qo'annoo",
+    plan_sub: "Karoora qophaa'e hordofaa ykn karoora mataa keessanii uumaa.",
+    tile_ref: "Sagantaa Afeerraa (Study Squad)",
+    tile_ref_sub: "Koodii keessan hiriyootaaf qoodaa",
+    tile_req: "Kitaaba / Qormaata Gaafadhu",
+    tile_req_sub: "Qormaata darbe ykn kitaaba barbaaddan gaafadhaa",
+    ref_modal_title: "Sagantaa Afeerraa",
+    your_ref_code: "Koodii Afeerraa Keessan",
+    ref_verified_lbl: "Hiriyoota Mirkaneeffaman:",
+    btn_share_tg: "Telegram irratti Qoodi",
+    btn_copy_code: "Koodii Koppii Godhi",
+    ref_how_title: "Faayidaa Study Squad",
+    ref_how_body: "Koodii keessan hiriyoota Bishooftuu keessaniif qoodaa. Hiriyoonni 2 yemmuu galmaa'anii mirkaneeffaman teessoo Study Squad fi hir'ina kaffaltii argattu.",
+    req_modal_title: "Kitaaba / Qormaata Gaafadhu",
+    req_desc: "Qormaata darbe ykn kitaaba barbaaddan yoo dhabdan nuuf ergaa.",
+    btn_send_req: "Gaaffii Ergi",
+    btn_offline_tg: "Telegram keessatti Offline Dubbisuuf Olkaa'i",
+    cd_matric_12: "hanga Qormaata Biyyaalessaa Kutaa 12 (ESSLCE)",
+    cd_ministry_8: "hanga Qormaata Ministirii Kutaa 8",
+    cd_ministry_6: "hanga Qormaata Ministirii Kutaa 6",
+    cd_semester: "hanga Qormaata Xumura Seemisteraa",
+    days_left: "guyyaa",
+    launch_banner: "Yeroo Jalqabaa: Fayyadamtoonni galmaa'an hundi kitaabotaa fi qormaata hunda bilisaan argatu.",
+    trial_banner: "Moodii Yaalii: Kitaabonni 3 fi gaaffileen 10 banamaniiru. Galmeen yoo mirkanaa'e hundi ni banama.",
+  },
 };
 
+const LANG_LABELS = { en: "Lang: EN", am: "ቋንቋ: አማ", om: "Afaan: OM" };
+
 let currentLang = localStorage.getItem("qelal_lang") || "en";
+if (!["en", "am", "om"].includes(currentLang)) currentLang = "en";
+
 function t(key) {
   return (I18N[currentLang] && I18N[currentLang][key]) || I18N.en[key] || key;
 }
@@ -172,11 +236,13 @@ function applyTranslations() {
     const key = el.getAttribute("data-i18n-placeholder");
     if (I18N[currentLang][key]) el.placeholder = I18N[currentLang][key];
   });
+  ["onboardLangBtn", "appLangBtn"].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.textContent = LANG_LABELS[currentLang] || "EN · አማ · OM";
+  });
   const roleTag = document.getElementById("formRoleTag");
   if (roleTag) {
-    roleTag.textContent = selectedRole === "parent"
-      ? (currentLang === "am" ? "ወላጅ" : "Parent")
-      : (currentLang === "am" ? "ተማሪ" : "Student");
+    roleTag.textContent = selectedRole === "parent" ? t("role_parent") : t("role_student");
   }
   const nameLbl = document.getElementById("lblFullName");
   if (nameLbl) {
@@ -264,7 +330,7 @@ async function initApp() {
 
     userProfile = data;
     sessionToken = data.token;
-    if (data.lang && !localStorage.getItem("qelal_lang")) {
+    if (data.lang && ["en", "am", "om"].includes(data.lang) && !localStorage.getItem("qelal_lang")) {
       currentLang = data.lang;
     }
 
@@ -360,9 +426,11 @@ function renderParentChildrenForm() {
     }
 
     const showStream = ch.grade === "Grade 11" || ch.grade === "Grade 12";
-    const childLbl = currentLang === "am" ? `ልጅ #${idx + 1}` : `Child #${idx + 1}`;
-    const namePh = currentLang === "am" ? "የልጁ ሙሉ ስም" : "Child's Full Name";
-    const tgPh = currentLang === "am" ? "የልጁ ቴሌግራም (@username ወይም ስልክ - አማራጭ)" : "Child's Telegram (@username or phone - optional)";
+    const childLbl = currentLang === "am" ? `ልጅ #${idx + 1}` : (currentLang === "om" ? `Mucaa #${idx + 1}` : `Child #${idx + 1}`);
+    const namePh = currentLang === "am" ? "የልጁ ሙሉ ስም" : (currentLang === "om" ? "Maqaa Guutuu Mucaa" : "Child's Full Name");
+    const tgPh = currentLang === "am"
+      ? "የልጁ ቴሌግራም (@username ወይም ስልክ)"
+      : (currentLang === "om" ? "Teessoo Telegram/Bilbila Mucaa (@username ykn bilbila)" : "Child's Telegram (@username or phone)");
 
     card.innerHTML = `
       <div class="child-card-head">
@@ -409,7 +477,11 @@ document.getElementById("submitRegBtn").onclick = async () => {
   const referralCode = document.getElementById("regRefCode").value.trim().toUpperCase();
 
   if (!fullName || !phone) {
-    return showToast(currentLang === "am" ? "እባክዎ ስም እና ስልክ ቁጥር ያስገቡ።" : "Please enter full name and phone number.");
+    return showToast(
+      currentLang === "am"
+        ? "እባክዎ ስም እና ስልክ ቁጥር ያስገቡ።"
+        : (currentLang === "om" ? "Maaloo maqaa fi lakkoofsa bilbilaa galchaa." : "Please enter full name and phone number.")
+    );
   }
 
   let payloadChildren = [];
@@ -423,7 +495,11 @@ document.getElementById("submitRegBtn").onclick = async () => {
   } else {
     for (let i = 0; i < parentChildren.length; i++) {
       if (!parentChildren[i].name.trim()) {
-        return showToast(currentLang === "am" ? `እባክዎ የልጅ #${i + 1} ስም ያስገቡ።` : `Please enter Child #${i + 1}'s name.`);
+        return showToast(
+          currentLang === "am"
+            ? `እባክዎ የልጅ #${i + 1} ስም ያስገቡ።`
+            : (currentLang === "om" ? `Maaloo maqaa mucaa #${i + 1} galchaa.` : `Please enter Child #${i + 1}'s name.`)
+        );
       }
     }
     payloadChildren = parentChildren.map((c) => ({ ...c, format }));
@@ -431,7 +507,7 @@ document.getElementById("submitRegBtn").onclick = async () => {
 
   const btn = document.getElementById("submitRegBtn");
   btn.disabled = true;
-  btn.textContent = currentLang === "am" ? "በመመዝገብ ላይ..." : "Saving registration...";
+  btn.textContent = currentLang === "am" ? "በመመዝገብ ላይ..." : (currentLang === "om" ? "Galmeessaa jira..." : "Saving registration...");
 
   try {
     const data = await fetchJsonSafe("/api/register", {
@@ -461,9 +537,11 @@ document.getElementById("submitRegBtn").onclick = async () => {
 };
 
 async function toggleLanguage() {
-  currentLang = currentLang === "en" ? "am" : "en";
+  const order = ["en", "am", "om"];
+  currentLang = order[(order.indexOf(currentLang) + 1) % order.length];
   localStorage.setItem("qelal_lang", currentLang);
   applyTranslations();
+  renderParentChildrenForm();
   if (sessionToken) {
     renderHeaderAndBanners();
     buildBottomNav();
@@ -482,11 +560,13 @@ document.getElementById("appLangBtn").onclick = toggleLanguage;
 // ================= 3. HEADER, COUNTDOWN & BOTTOM NAV =================
 function renderHeaderAndBanners() {
   const firstName = (userProfile.name || "Member").split(" ")[0];
-  document.getElementById("hdrGreeting").textContent = currentLang === "am" ? `ሰላም, ${firstName}` : firstName;
+  document.getElementById("hdrGreeting").textContent = currentLang === "am"
+    ? `ሰላም, ${firstName}`
+    : (currentLang === "om" ? `Akkam, ${firstName}` : firstName);
   document.getElementById("hdrMeta").textContent = userProfile.is_admin
     ? "Admin · Qelal Hub"
     : userProfile.role === "parent"
-      ? (currentLang === "am" ? "የወላጅ ዳሽቦርድ" : "Parent Portal")
+      ? (currentLang === "am" ? "የወላጅ ዳሽቦርድ" : (currentLang === "om" ? "Daashboordii Maatii" : "Parent Portal"))
       : (userProfile.stream && userProfile.stream !== "General" ? `${userProfile.grade} · ${userProfile.stream}` : userProfile.grade);
   document.getElementById("hdrRefCount").textContent = userProfile.referral_count || 0;
   if (userProfile.is_admin) document.getElementById("refreshBtn").classList.remove("hidden");
@@ -529,19 +609,25 @@ function buildBottomNav() {
   const isParent = userProfile.role === "parent";
   const tabs = [];
 
+  const lbls = {
+    en: { home: "Home", lib: "Library", quiz: "Quiz", plan: "Plan", saved: "Saved", inv: "Invite" },
+    am: { home: "ዋና", lib: "መጽሐፍት", quiz: "ፈተና", plan: "እቅድ", saved: "ተጨማሪ", inv: "ጋብዝ" },
+    om: { home: "Mana", lib: "Kitaaba", quiz: "Qormaata", plan: "Karoora", saved: "Olkaa'ame", inv: "Afeeri" },
+  }[currentLang];
+
   if (isParent) {
-    tabs.push({ id: "tabParentHome", ico: ICONS.home, lbl: currentLang === "am" ? "ዋና" : "Home" });
+    tabs.push({ id: "tabParentHome", ico: ICONS.home, lbl: lbls.home });
   }
   tabs.push(
-    { id: "tabLibrary", ico: ICONS.book, lbl: currentLang === "am" ? "መጽሐፍት" : "Library" },
-    { id: "tabQuiz", ico: ICONS.quiz, lbl: currentLang === "am" ? "ፈተና" : "Quiz" },
-    { id: "tabPlan", ico: ICONS.plan, lbl: currentLang === "am" ? "እቅድ" : "Plan" },
-    { id: "tabMore", ico: ICONS.saved, lbl: currentLang === "am" ? "ተጨማሪ" : "Saved" },
+    { id: "tabLibrary", ico: ICONS.book, lbl: lbls.lib },
+    { id: "tabQuiz", ico: ICONS.quiz, lbl: lbls.quiz },
+    { id: "tabPlan", ico: ICONS.plan, lbl: lbls.plan },
+    { id: "tabMore", ico: ICONS.saved, lbl: lbls.saved },
   );
   if (userProfile.is_admin) {
     tabs.push({ id: "tabAdmin", ico: ICONS.admin, lbl: "Admin" });
   } else if (!isParent) {
-    tabs.push({ id: "__ref", ico: ICONS.invite, lbl: currentLang === "am" ? "ጋብዝ" : "Invite" });
+    tabs.push({ id: "__ref", ico: ICONS.invite, lbl: lbls.inv });
   }
 
   nav.innerHTML = "";
@@ -575,7 +661,7 @@ async function renderParentDashboard() {
   const isTrial = userProfile.tier === "TRIAL";
   sc.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-      <strong style="color:var(--navy);">${currentLang === "am" ? "የአባልነት ሁኔታ" : "Membership Status"}</strong>
+      <strong style="color:var(--navy);">${currentLang === "am" ? "የአባልነት ሁኔታ" : (currentLang === "om" ? "Haala Miseensummaa" : "Membership Status")}</strong>
       <span class="doc-tag ${isTrial ? "brass" : "teal"}">${userProfile.launch_mode === "OPEN_LAUNCH" ? "Launch Open" : userProfile.status}</span>
     </div>
     <p class="muted-p" style="margin-bottom:10px;">
@@ -583,7 +669,7 @@ async function renderParentDashboard() {
       ${userProfile.days_left !== null ? `Valid for ${Math.max(0, userProfile.days_left)} more day(s).` : (isTrial ? t("trial_banner") : t("launch_banner"))}
     </p>
     <button class="btn btn-primary" style="width:100%;" onclick="switchTab('tabLibrary')">
-      ${currentLang === "am" ? "መጽሐፍት እና ፈተናዎችን ክፈት" : "Open Library, Quizzes & Study Plans"}
+      ${currentLang === "am" ? "መጽሐፍት እና ፈተናዎችን ክፈት" : (currentLang === "om" ? "Kitaabota fi Qormaata Bani" : "Open Library, Quizzes & Study Plans")}
     </button>
   `;
 
@@ -633,6 +719,12 @@ function renderParentVisualContent() {
     ? `<span class="doc-tag teal">Telegram Connected</span>`
     : (ch.is_shared_phone ? `<span class="doc-tag brass">Shared Device Tracking</span>` : `<span class="doc-tag">Not Linked</span>`);
 
+  const kpiLbls = {
+    en: ["PDFs Opened", "Quizzes Taken", "Bookmarks", "Study Plan"],
+    am: ["የተከፈቱ መጽሐፍት", "የተሰሩ ፈተናዎች", "ምልክት የተደረጉ", "የጥናት እቅድ"],
+    om: ["Kitaabota Banaman", "Qormaata Hojjataman", "Kan Filataman", "Karoora Qo'annoo"],
+  }[currentLang];
+
   let htmlOut = `
     <div class="surface-card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px;">
@@ -653,22 +745,22 @@ function renderParentVisualContent() {
     <div class="kpi-grid">
       <div class="kpi-cell">
         <div class="kpi-val">${k.pdfs_opened}</div>
-        <div class="kpi-lbl">${currentLang === "am" ? "የተከፈቱ መጽሐፍት" : "PDFs Opened"}</div>
+        <div class="kpi-lbl">${kpiLbls[0]}</div>
         <div class="kpi-sub">${k.total_views} total opens</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-val">${k.quizzes_taken}</div>
-        <div class="kpi-lbl">${currentLang === "am" ? "የተሰሩ ፈተናዎች" : "Quizzes Taken"}</div>
+        <div class="kpi-lbl">${kpiLbls[1]}</div>
         <div class="kpi-sub">${k.avg_quiz_pct !== null ? `${k.avg_quiz_pct}% avg` : "No quizzes yet"}</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-val">${k.bookmarks_count}</div>
-        <div class="kpi-lbl">${currentLang === "am" ? "ምልክት የተደረጉ" : "Bookmarks"}</div>
+        <div class="kpi-lbl">${kpiLbls[2]}</div>
         <div class="kpi-sub">${k.offline_saved} saved offline</div>
       </div>
       <div class="kpi-cell">
         <div class="kpi-val">${k.plan_pct}%</div>
-        <div class="kpi-lbl">${currentLang === "am" ? "የጥናት እቅድ" : "Study Plan"}</div>
+        <div class="kpi-lbl">${kpiLbls[3]}</div>
         <div class="kpi-sub">${k.plan_done} / ${k.plan_total} tasks</div>
       </div>
     </div>
@@ -688,12 +780,8 @@ function renderParentVisualContent() {
         </div>
       `;
     }).join("");
-    htmlOut += `
-      <div class="chart-card">
-        <div class="chart-head"><h4>${currentLang === "am" ? "የትምህርት ክፍፍል" : "Activity by Subject"}</h4></div>
-        ${rowsHtml}
-      </div>
-    `;
+    const subjTitle = currentLang === "am" ? "የትምህርት ክፍፍል" : (currentLang === "om" ? "Sochii Gosa Barnootaan" : "Activity by Subject");
+    htmlOut += `<div class="chart-card"><div class="chart-head"><h4>${subjTitle}</h4></div>${rowsHtml}</div>`;
   }
 
   const maxDay = Math.max(...ch.daily_7d.map((d) => d.count), 1);
@@ -707,12 +795,8 @@ function renderParentVisualContent() {
       </div>
     `;
   }).join("");
-  htmlOut += `
-    <div class="chart-card">
-      <div class="chart-head"><h4>${currentLang === "am" ? "የ7 ቀናት የጥናት እንቅስቃሴ" : "Last 7 Days Study Activity"}</h4></div>
-      <div class="week-grid">${weekCols}</div>
-    </div>
-  `;
+  const weekTitle = currentLang === "am" ? "የ7 ቀናት የጥናት እንቅስቃሴ" : (currentLang === "om" ? "Sochii Guyyoota 7 Darban" : "Last 7 Days Study Activity");
+  htmlOut += `<div class="chart-card"><div class="chart-head"><h4>${weekTitle}</h4></div><div class="week-grid">${weekCols}</div></div>`;
 
   if (ch.recent_reads.length || ch.bookmarked_docs.length) {
     const readRows = ch.recent_reads.map((r) => `
@@ -741,7 +825,7 @@ function renderParentVisualContent() {
 }
 
 function buildQuizTrendSvgCard(trend, deltaPct) {
-  const title = currentLang === "am" ? "የፈተና ውጤት መሻሻል" : "Quiz Score Trend";
+  const title = currentLang === "am" ? "የፈተና ውጤት መሻሻል" : (currentLang === "om" ? "Fooyya'iinsa Qabxii Qormaataa" : "Quiz Score Trend");
   if (!trend || !trend.length) {
     return `
       <div class="chart-card">
@@ -825,7 +909,9 @@ function renderParentReportsList() {
       <div class="surface-card">
         <p class="muted-p">${currentLang === "am"
           ? "የአስተባባሪ የሁለት ሳምንት ሪፖርቶች ሲለቀቁ እዚህ ይታያሉ።"
-          : "Bi-weekly coordinator notes (attendance, class observations, and next focus) will appear here once published."}</p>
+          : (currentLang === "om"
+            ? "Gabaasni qindeessaa torban lamaan bahu asitti mul'ata."
+            : "Bi-weekly coordinator notes (attendance, class observations, and next focus) will appear here once published.")}</p>
       </div>
     `;
     return;
@@ -1212,16 +1298,18 @@ function renderCards() {
     if (it.locked) {
       const unlockBtn = document.createElement("button");
       unlockBtn.className = "btn btn-locked";
-      unlockBtn.textContent = currentLang === "am" ? "ምዝገባ ሲጸድቅ ይከፈታል" : "Available after approval";
+      unlockBtn.textContent = currentLang === "am"
+        ? "ምዝገባ ሲጸድቅ ይከፈታል"
+        : (currentLang === "om" ? "Erga mirkanaa'ee ni banama" : "Available after approval");
       unlockBtn.onclick = () => showToast(currentLang === "am"
         ? "ለመክፈት +251 933 510 682 ላይ ይደውሉ።"
-        : "Complete enrollment or call +251 933 510 682 for full access.");
+        : (currentLang === "om" ? "Guutuu banuuf +251 933 510 682 irratti bilbilaa." : "Complete enrollment or call +251 933 510 682 for full access."));
       actions.appendChild(unlockBtn);
     } else {
       if (it.has_pdf) {
         const readBtn = document.createElement("button");
         readBtn.className = "btn btn-primary";
-        readBtn.textContent = lastPg ? `Resume p.${lastPg}` : "Read";
+        readBtn.textContent = lastPg ? `Resume p.${lastPg}` : (currentLang === "om" ? "Dubbisi" : "Read");
         readBtn.onclick = () => openReader(it, false, false);
         actions.appendChild(readBtn);
       }
@@ -1256,7 +1344,7 @@ function renderCards() {
 }
 
 async function sendOfflineTelegram(item) {
-  showToast(currentLang === "am" ? "በቴሌግራም ውስጥ በመላክ ላይ..." : "Saving protected copy inside Telegram...");
+  showToast(currentLang === "am" ? "በቴሌግራም ውስጥ በመላክ ላይ..." : (currentLang === "om" ? "Telegram keessatti ergamaa jira..." : "Saving protected copy inside Telegram..."));
   try {
     const data = await fetchJsonSafe(`/api/file/${item.doc_id}/send`, {
       method: "POST", headers: { Authorization: `Bearer ${sessionToken}` },
@@ -1264,7 +1352,7 @@ async function sendOfflineTelegram(item) {
     if (data.ok) {
       showToast(currentLang === "am"
         ? "በቴሌግራም ተቀምጧል (ኦፍላይን ለማንበብ ብቻ)።"
-        : "Saved in Telegram for offline reading (forwarding and local saving disabled).");
+        : (currentLang === "om" ? "Telegram keessatti offline dubbisuuf olkaa'ameera." : "Saved in Telegram for offline reading (forwarding and local saving disabled)."));
     } else showToast(data.message || "Could not send file.");
   } catch (err) {
     showToast("Error: " + err.message);
@@ -1305,10 +1393,12 @@ async function loadAndRenderPlans() {
   body.innerHTML = "";
   const customCard = document.createElement("div");
   customCard.className = "plan-card";
+  const customTitle = currentLang === "am" ? "የራሴ የጥናት እቅድ" : (currentLang === "om" ? "Karoora Qo'annoo Mataa Koo" : "Custom Study Checklist");
+  const customPh = currentLang === "am" ? "የዛሬ ግብ ይጻፉ..." : (currentLang === "om" ? "Hojii har'aa dabali..." : "Add task (e.g. Biology Unit 2 + 20 Qs)");
   customCard.innerHTML = `
-    <h4 style="margin-bottom:8px;color:var(--navy);">${currentLang === "am" ? "የራሴ የጥናት እቅድ" : "Custom Study Checklist"}</h4>
+    <h4 style="margin-bottom:8px;color:var(--navy);">${customTitle}</h4>
     <div style="display:flex;gap:6px;margin-bottom:8px;">
-      <input id="customTaskInput" class="q-input" placeholder="${currentLang === "am" ? "የዛሬ ግብ ይጻፉ..." : "Add task (e.g. Biology Unit 2 + 20 Qs)"}" />
+      <input id="customTaskInput" class="q-input" placeholder="${customPh}" />
       <button id="addCustomTaskBtn" class="btn btn-primary" style="flex:0 0 auto;">Add</button>
     </div>
     <div id="customTaskList"></div>
@@ -1373,7 +1463,10 @@ async function loadAndRenderPlans() {
 
 function renderSavedTab() {
   const body = document.getElementById("savedBody");
-  body.innerHTML = `<h4 style="margin-bottom:8px;font-size:14px;color:var(--navy);">${currentLang === "am" ? "በቅርብ የተነበቡ" : "Continue Reading"}</h4>`;
+  const contTitle = currentLang === "am" ? "በቅርብ የተነበቡ" : (currentLang === "om" ? "Itti Fufi Dubbisuuf" : "Continue Reading");
+  const bmTitle = currentLang === "am" ? "ምልክት የተደረገባቸው" : (currentLang === "om" ? "Kan Filataman" : "Bookmarked Materials");
+
+  body.innerHTML = `<h4 style="margin-bottom:8px;font-size:14px;color:var(--navy);">${contTitle}</h4>`;
   const recents = Object.entries(progress.last_read || {}).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0)).slice(0, 6);
   if (!recents.length) body.innerHTML += `<p class="muted-p" style="margin-bottom:14px;">No recently opened PDFs yet.</p>`;
   recents.forEach(([docId, info]) => {
@@ -1386,7 +1479,7 @@ function renderSavedTab() {
     body.appendChild(c);
   });
 
-  body.innerHTML += `<h4 style="margin:14px 0 8px;font-size:14px;color:var(--navy);">${currentLang === "am" ? "ምልክት የተደረገባቸው" : "Bookmarked Materials"}</h4>`;
+  body.innerHTML += `<h4 style="margin:14px 0 8px;font-size:14px;color:var(--navy);">${bmTitle}</h4>`;
   if (!(progress.bookmarks || []).length) body.innerHTML += `<p class="muted-p">Tap the star icon on any resource to save it here.</p>`;
   (progress.bookmarks || []).forEach((docId) => {
     const it = itemsById[docId];
