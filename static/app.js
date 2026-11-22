@@ -672,7 +672,7 @@
 
     applyStaticTranslations();
 
-    if (state.auth && state.auth.registered) {
+if (state.auth && (state.auth.registered || state.auth.ok)) {
       state.auth.lang = lang;
       populateLibraryFilterOptions();
       renderPortalHeader();
