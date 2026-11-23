@@ -1737,6 +1737,6 @@ async def webhook(request: Request):
     return Response(status_code=HTTPStatus.OK)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def index():
     return {"status": "Qelal Learning (ቀላል) Bot is active!"}
