@@ -181,6 +181,15 @@
       pdfError: "Could not display PDF inline.",
       pdfTryFrame: "Open fallback viewer",
       sentChatOk: "Sent to your Telegram chat.",
+      adminSyncTitle: "Google Drive Sync & PDF Verification",
+      syncDriveBtn: "Sync Google Drive",
+      verifyLinksBtn: "Verify PDF Links (40)",
+      forceVerifyBtn: "Force Re-Verify",
+      refreshAdminBtn: "Refresh Data",
+      adminPdfTitle: "PDF Library Status",
+      confirmLinkBtn: "Confirm Match",
+      unlinkBtn: "Unlink",
+      showMoreBtn: "Show more",
       adminConfigTitle: "System Configuration",
       saveConfig: "Save settings",
       adminPublishTitle: "Publish Bi-Weekly Progress Report",
@@ -350,6 +359,15 @@
       pdfError: "ፋይሉን እዚህ ማሳየት አልተቻለም።",
       pdfTryFrame: "በተለዋጭ መክፈቻ ክፈት",
       sentChatOk: "ወደ ቴሌግራም ቻትዎ ተልኳል።",
+      adminSyncTitle: "የGoogle Drive እና PDF ማገናኛ",
+      syncDriveBtn: "Google Drive አስምር",
+      verifyLinksBtn: "PDF አረጋግጥ (40)",
+      forceVerifyBtn: "እንደገና አረጋግጥ",
+      refreshAdminBtn: "መረጃ አድስ",
+      adminPdfTitle: "የPDF መጽሐፍት ሁኔታ",
+      confirmLinkBtn: "አጽድቅ",
+      unlinkBtn: "አላቅቅ",
+      showMoreBtn: "ተጨማሪ አሳይ",
       adminConfigTitle: "የስርዓት ማስተካከያ",
       saveConfig: "ቅንብሮችን አስቀምጥ",
       adminPublishTitle: "የሁለት ሳምንት ሪፖርት ላክ",
@@ -519,6 +537,15 @@
       pdfError: "PDF asitti mul'isuun hin danda'amne.",
       pdfTryFrame: "Banaa biraatiin yaali",
       sentChatOk: "Gara chaatii Telegram keessaniitti ergameera.",
+      adminSyncTitle: "Qindaa'ina Google Drive fi Mirkaneessa PDF",
+      syncDriveBtn: "Google Drive Qindeessi",
+      verifyLinksBtn: "PDF Mirkaneessi (40)",
+      forceVerifyBtn: "Irra Deebi'ii Mirkaneessi",
+      refreshAdminBtn: "Haaromsi",
+      adminPdfTitle: "Haala Mana Kitaabaa PDF",
+      confirmLinkBtn: "Mirkaneessi",
+      unlinkBtn: "Addaan Baasi",
+      showMoreBtn: "Dabalata agarsiisi",
       adminConfigTitle: "Qindaa'ina Sirnaa",
       saveConfig: "Qindaa'ina ol-kaa'i",
       adminPublishTitle: "Gabaasa Torban Lamaa Ergi",
@@ -562,6 +589,10 @@
     adminOverview: null,
     adminAccountFilter: "ALL",
     adminAccountSearch: "",
+    adminPdfFilter: "ALL",
+    adminPdfSearch: "",
+    adminPdfLimit: 40,
+    adminPollTimer: null,
     pdfDocId: null,
     pdfDocObj: null,
     pdfPage: 1,
@@ -672,7 +703,7 @@
 
     applyStaticTranslations();
 
-if (state.auth && (state.auth.registered || state.auth.ok)) {
+    if (state.auth && (state.auth.registered || state.auth.ok)) {
       state.auth.lang = lang;
       populateLibraryFilterOptions();
       renderPortalHeader();
@@ -1117,6 +1148,9 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
   }
 
   function renderActiveView() {
+    if (state.activeTab !== "admin") {
+      stopAdminJobPolling();
+    }
     ["viewParent", "viewLibrary", "viewPlans", "viewAccount", "viewAdmin"].forEach((id) => {
       setHidden(id, true);
     });
@@ -2230,13 +2264,285 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
   }
 
   // ==================== ADMIN CONSOLE VIEW ====================
+  function stopAdminJobPolling() {
+    if (state.adminPollTimer) {
+      clearInterval(state.adminPollTimer);
+      state.adminPollTimer = null;
+    }
+  }
+
+  function renderAdminJobsBox(jobs) {
+    const box = document.getElementById("adminJobsBox");
+    if (!box) return;
+    const sync = (jobs && jobs.sync) || {};
+    const verify = (jobs && jobs.verify) || {};
+
+    const syncTag = sync.running ? "is-warn" : sync.ok === false ? "is-rubric" : sync.ok === true ? "is-pass" : "";
+    const verifyTag = verify.running ? "is-warn" : verify.ok === false ? "is-rubric" : verify.ok === true ? "is-pass" : "";
+
+    box.innerHTML = `
+      <div class="compact-list">
+        <div class="compact-row">
+          <div style="min-width:0;">
+            <div class="doc-title">Google Drive Sync</div>
+            <div class="doc-meta">${esc(sync.running ? sync.message || "Running..." : sync.last_summary || sync.message || "Idle")}${sync.updated_at ? " · " + esc(sync.updated_at) : ""}</div>
+          </div>
+          <span class="status-tag ${syncTag}">${esc(sync.running ? "RUNNING" : sync.ok === false ? "FAILED" : sync.ok === true ? "DONE" : "IDLE")}</span>
+        </div>
+        <div class="compact-row">
+          <div style="min-width:0;">
+            <div class="doc-title">PDF Link Verification</div>
+            <div class="doc-meta">${esc(verify.running ? verify.message || "Running..." : verify.last_summary || verify.message || "Idle")}${verify.updated_at ? " · " + esc(verify.updated_at) : ""}</div>
+          </div>
+          <span class="status-tag ${verifyTag}">${esc(verify.running ? "RUNNING" : verify.ok === false ? "FAILED" : verify.ok === true ? "DONE" : "IDLE")}</span>
+        </div>
+      </div>
+    `;
+
+    const btnSync = document.getElementById("btnAdminSyncDrive");
+    const btnVerify = document.getElementById("btnAdminVerifyLinks");
+    const btnForce = document.getElementById("btnAdminForceVerify");
+    if (btnSync) btnSync.disabled = !!sync.running;
+    if (btnVerify) btnVerify.disabled = !!verify.running;
+    if (btnForce) btnForce.disabled = !!verify.running;
+  }
+
+  function startAdminJobPolling() {
+    if (state.adminPollTimer) return;
+    state.adminPollTimer = setInterval(async () => {
+      if (state.activeTab !== "admin") {
+        stopAdminJobPolling();
+        return;
+      }
+      try {
+        const res = await apiFetch("/api/admin/job-status");
+        const jobs = res.jobs || {};
+        const prevSync = state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.sync && state.adminOverview.jobs.sync.running;
+        const prevVerify = state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.verify && state.adminOverview.jobs.verify.running;
+        if (state.adminOverview) {
+          state.adminOverview.jobs = jobs;
+        }
+        renderAdminJobsBox(jobs);
+
+        const nowRunning = !!(jobs.sync && jobs.sync.running) || !!(jobs.verify && jobs.verify.running);
+        if (!nowRunning) {
+          stopAdminJobPolling();
+          if (prevSync || prevVerify) {
+            await renderAdminView(true);
+            await loadLibrary(true);
+          }
+        }
+      } catch (_) {}
+    }, 4000);
+  }
+
+  function renderAdminAccountsList() {
+    const listEl = document.getElementById("admAccountsList");
+    const headEl = document.getElementById("admAccountsCount");
+    if (!listEl || !state.adminOverview) return;
+
+    const regs = (state.adminOverview.registrations || []).filter((r) => {
+      if (state.adminAccountFilter !== "ALL" && r.status !== state.adminAccountFilter) return false;
+      if (state.adminAccountSearch) {
+        const hay = `${r.name} ${r.phone} ${r.grade} ${r.referral_code}`.toLowerCase();
+        if (!hay.includes(state.adminAccountSearch.toLowerCase())) return false;
+      }
+      return true;
+    });
+
+    if (headEl) headEl.textContent = `${esc(t("adminAccountsTitle"))} (${regs.length})`;
+
+    listEl.innerHTML = regs.length
+      ? regs
+          .map(
+            (r) => `
+          <div class="ledger-row">
+            <div class="ledger-row-head">
+              <div>
+                <div class="doc-title">${esc(r.name)} <span class="meta-line">(${esc(r.role)})</span></div>
+                <div class="doc-meta">${esc(r.grade)} · ${esc(r.phone)} · M${r.months_paid || 0} ${r.expires_on ? "· Exp " + esc(r.expires_on) : ""}</div>
+              </div>
+              <span class="status-tag ${r.status === "APPROVED" ? "is-pass" : r.status === "NEW" ? "is-warn" : "is-rubric"}">${esc(r.status)}</span>
+            </div>
+            <div class="btn-row">
+              ${
+                r.status === "NEW"
+                  ? `<button type="button" class="btn btn-primary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="approve">${esc(t("approve30d"))}</button>`
+                  : `<button type="button" class="btn btn-primary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="mark_paid">${esc(t("renew30d"))}</button>`
+              }
+              <button type="button" class="btn btn-secondary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="mark_left">${esc(t("markLeft"))}</button>
+              <button type="button" class="btn btn-danger btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="reject">${esc(t("rejectBtn"))}</button>
+            </div>
+          </div>
+        `
+          )
+          .join("")
+      : `<div class="ledger-row"><p class="muted-text">—</p></div>`;
+
+    listEl.querySelectorAll(".adm-act-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/admin/student-action", {
+            method: "POST",
+            body: JSON.stringify({ tg_id: btn.dataset.tg, action: btn.dataset.act }),
+          });
+          showToast(t("actionDone"));
+          await renderAdminView(true);
+        } catch (err) {
+          showToast(err.message, true);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
+  function renderAdminPdfsList() {
+    const listEl = document.getElementById("admPdfsList");
+    const headEl = document.getElementById("admPdfsCount");
+    const moreWrap = document.getElementById("admPdfsMoreWrap");
+    if (!listEl || !state.adminOverview) return;
+
+    const allPdfs = state.adminOverview.pdfs || [];
+    const filtered = allPdfs.filter((p) => {
+      if (state.adminPdfFilter === "VERIFIED") {
+        if (p.link_status !== "AUTO_VERIFIED" && p.link_status !== "MANUAL_VERIFIED") return false;
+      } else if (state.adminPdfFilter === "NEEDS_REVIEW") {
+        if (p.link_status !== "NEEDS_REVIEW") return false;
+      } else if (state.adminPdfFilter === "REJECTED") {
+        if (p.link_status !== "REJECTED_MISMATCH") return false;
+      } else if (state.adminPdfFilter === "UNVERIFIED") {
+        if (p.link_status && p.link_status !== "UNVERIFIED") return false;
+      } else if (state.adminPdfFilter === "HAS_QUIZ") {
+        if (!p.has_quiz) return false;
+      } else if (state.adminPdfFilter === "TRIAL_PICK") {
+        if (!p.is_trial) return false;
+      }
+
+      if (state.adminPdfSearch) {
+        const hay = `${p.doc_id} ${p.file_name} ${p.grade} ${p.subject} ${p.category} ${p.link_status}`.toLowerCase();
+        if (!hay.includes(state.adminPdfSearch.toLowerCase())) return false;
+      }
+      return true;
+    });
+
+    if (headEl) headEl.textContent = `${esc(t("adminPdfTitle"))} (${filtered.length})`;
+
+    const shown = filtered.slice(0, state.adminPdfLimit);
+    listEl.innerHTML = shown.length
+      ? shown
+          .map((p) => {
+            const st = p.link_status || "UNVERIFIED";
+            const tagClass =
+              st === "AUTO_VERIFIED" || st === "MANUAL_VERIFIED"
+                ? "is-pass"
+                : st === "NEEDS_REVIEW"
+                ? "is-warn"
+                : st === "REJECTED_MISMATCH"
+                ? "is-rubric"
+                : "";
+            const metaLine = [
+              p.doc_id,
+              p.grade,
+              p.subject,
+              p.category,
+              p.file_size_mb ? `${p.file_size_mb} MB` : "",
+              p.source,
+              p.has_quiz ? `Quiz ${p.quiz_total_q}Q` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ");
+            const linkLine = p.linked_doc_id
+              ? `<div class="doc-meta">Linked: ${esc(p.linked_doc_id)}${p.linked_file_name ? " — " + esc(p.linked_file_name) : ""}</div>`
+              : "";
+
+            return `
+              <div class="ledger-row">
+                <div class="ledger-row-head">
+                  <div style="min-width:0;">
+                    <div class="doc-title">${esc(p.file_name)}</div>
+                    <div class="doc-meta">${esc(metaLine)}</div>
+                    ${linkLine}
+                  </div>
+                  <span class="status-tag ${tagClass}">${esc(st)}</span>
+                </div>
+                <div class="btn-row">
+                  <button type="button" class="btn btn-secondary btn-sm adm-pdf-trial ${p.is_trial ? "active" : ""}" data-doc="${esc(p.doc_id)}" data-trial="${p.is_trial ? "1" : "0"}">${esc(
+                    p.is_trial ? t("isTrialPick") : t("setTrialPick")
+                  )}</button>
+                  ${
+                    p.linked_doc_id && st === "NEEDS_REVIEW"
+                      ? `<button type="button" class="btn btn-primary btn-sm adm-pdf-link" data-doc="${esc(p.doc_id)}" data-act="confirm">${esc(t("confirmLinkBtn"))}</button>
+                         <button type="button" class="btn btn-danger btn-sm adm-pdf-link" data-doc="${esc(p.doc_id)}" data-act="unlink">${esc(t("unlinkBtn"))}</button>`
+                      : p.linked_doc_id
+                      ? `<button type="button" class="btn btn-danger btn-sm adm-pdf-link" data-doc="${esc(p.doc_id)}" data-act="unlink">${esc(t("unlinkBtn"))}</button>`
+                      : ""
+                  }
+                </div>
+              </div>
+            `;
+          })
+          .join("")
+      : `<div class="ledger-row"><p class="muted-text">—</p></div>`;
+
+    if (moreWrap) {
+      if (filtered.length > shown.length) {
+        moreWrap.innerHTML = `<button type="button" id="btnAdmPdfsMore" class="btn btn-secondary btn-sm">${esc(t("showMoreBtn"))} (${filtered.length - shown.length})</button>`;
+        document.getElementById("btnAdmPdfsMore").addEventListener("click", () => {
+          state.adminPdfLimit += 40;
+          renderAdminPdfsList();
+        });
+      } else {
+        moreWrap.innerHTML = "";
+      }
+    }
+
+    listEl.querySelectorAll(".adm-pdf-trial").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const nextTrial = btn.dataset.trial !== "1";
+          await apiFetch("/api/admin/toggle-trial", {
+            method: "POST",
+            body: JSON.stringify({ doc_id: btn.dataset.doc, is_trial: nextTrial }),
+          });
+          showToast(t("actionDone"));
+          await renderAdminView(true);
+          await loadLibrary(true);
+        } catch (err) {
+          showToast(err.message, true);
+          btn.disabled = false;
+        }
+      });
+    });
+
+    listEl.querySelectorAll(".adm-pdf-link").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await apiFetch("/api/admin/link-action", {
+            method: "POST",
+            body: JSON.stringify({ doc_id: btn.dataset.doc, action: btn.dataset.act }),
+          });
+          showToast(t("actionDone"));
+          await renderAdminView(true);
+          await loadLibrary(true);
+        } catch (err) {
+          showToast(err.message, true);
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
   async function renderAdminView(forceReload = false) {
     const view = document.getElementById("viewAdmin");
     if (!view) return;
     if (!state.adminOverview || forceReload) {
       view.innerHTML = `<div class="panel-compact"><p class="muted-text">${esc(t("loading"))}</p></div>`;
       try {
-        state.adminOverview = await apiFetch("/api/admin/overview");
+        const url = forceReload ? "/api/admin/overview?refresh=true" : "/api/admin/overview";
+        state.adminOverview = await apiFetch(url);
       } catch (err) {
         view.innerHTML = `<div class="panel-compact"><p class="error-inline">${esc(err.message)}</p></div>`;
         return;
@@ -2246,15 +2552,17 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
     const ov = state.adminOverview;
     const sum = ov.summary || {};
     const cfg = ov.config || {};
+    const jobs = ov.jobs || {};
 
-    const regs = (ov.registrations || []).filter((r) => {
-      if (state.adminAccountFilter !== "ALL" && r.status !== state.adminAccountFilter) return false;
-      if (state.adminAccountSearch) {
-        const hay = `${r.name} ${r.phone} ${r.grade} ${r.referral_code}`.toLowerCase();
-        if (!hay.includes(state.adminAccountSearch.toLowerCase())) return false;
-      }
-      return true;
-    });
+    const pdfFilterTabs = [
+      { id: "ALL", label: `ALL (${sum.total_pdfs || 0})` },
+      { id: "VERIFIED", label: `VERIFIED (${sum.verified_links || 0})` },
+      { id: "NEEDS_REVIEW", label: `REVIEW (${sum.needs_review || 0})` },
+      { id: "REJECTED", label: `REJECTED (${sum.rejected_links || 0})` },
+      { id: "UNVERIFIED", label: `UNVERIFIED (${sum.unverified_links || 0})` },
+      { id: "HAS_QUIZ", label: `QUIZ (${sum.quiz_keys || 0})` },
+      { id: "TRIAL_PICK", label: `TRIAL (${sum.trial_picks || 0})` },
+    ];
 
     view.innerHTML = `
       <div class="kpi-ledger">
@@ -2263,6 +2571,34 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
         <div class="kpi-cell"><div class="kpi-value">${sum.total_students || 0}</div><div class="kpi-label">Students</div></div>
         <div class="kpi-cell"><div class="kpi-value">${sum.total_pdfs || 0}</div><div class="kpi-label">PDFs (${sum.quiz_keys || 0} keys)</div></div>
       </div>
+
+      <section class="admin-section">
+        <div class="ledger-row-head">
+          <h2 class="h2-section" style="margin:0;">${esc(t("adminSyncTitle"))}</h2>
+          <button type="button" id="btnAdminRefreshAll" class="btn btn-secondary btn-sm">${esc(t("refreshAdminBtn"))}</button>
+        </div>
+        <div id="adminJobsBox"></div>
+        <div class="btn-row">
+          <button type="button" id="btnAdminSyncDrive" class="btn btn-primary btn-sm">${esc(t("syncDriveBtn"))}</button>
+          <button type="button" id="btnAdminVerifyLinks" class="btn btn-primary btn-sm">${esc(t("verifyLinksBtn"))}</button>
+          <button type="button" id="btnAdminForceVerify" class="btn btn-secondary btn-sm">${esc(t("forceVerifyBtn"))}</button>
+        </div>
+      </section>
+
+      <section class="admin-section">
+        <h2 id="admPdfsCount" class="h2-section" style="margin:0;">${esc(t("adminPdfTitle"))} (${sum.total_pdfs || 0})</h2>
+        <div class="btn-row">
+          ${pdfFilterTabs
+            .map(
+              (tb) =>
+                `<button type="button" class="btn btn-secondary btn-sm adm-pdf-filter-btn ${state.adminPdfFilter === tb.id ? "active" : ""}" data-pf="${tb.id}">${esc(tb.label)}</button>`
+            )
+            .join("")}
+        </div>
+        <input id="admPdfSearchInput" type="search" class="input" placeholder="Search DOC-ID, file name, grade, subject..." value="${esc(state.adminPdfSearch)}" />
+        <div id="admPdfsList" class="ledger-list"></div>
+        <div id="admPdfsMoreWrap" style="margin-top:8px;"></div>
+      </section>
 
       <section class="admin-section">
         <h2 class="h2-section" style="margin:0;">${esc(t("adminConfigTitle"))}</h2>
@@ -2362,7 +2698,7 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
       </section>
 
       <section class="admin-section">
-        <h2 class="h2-section" style="margin:0;">${esc(t("adminAccountsTitle"))} (${regs.length})</h2>
+        <h2 id="admAccountsCount" class="h2-section" style="margin:0;">${esc(t("adminAccountsTitle"))}</h2>
         <div class="btn-row">
           ${["ALL", "NEW", "APPROVED", "EXPIRED", "LEFT"]
             .map(
@@ -2372,38 +2708,71 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
             .join("")}
         </div>
         <input id="admSearchInput" type="search" class="input" placeholder="Filter by name, phone, grade..." value="${esc(state.adminAccountSearch)}" />
-        <div class="ledger-list">
-          ${
-            regs.length
-              ? regs
-                  .map(
-                    (r) => `
-              <div class="ledger-row">
-                <div class="ledger-row-head">
-                  <div>
-                    <div class="doc-title">${esc(r.name)} <span class="meta-line">(${esc(r.role)})</span></div>
-                    <div class="doc-meta">${esc(r.grade)} · ${esc(r.phone)} · M${r.months_paid || 0} ${r.expires_on ? "· Exp " + esc(r.expires_on) : ""}</div>
-                  </div>
-                  <span class="status-tag ${r.status === "APPROVED" ? "is-pass" : r.status === "NEW" ? "is-warn" : "is-rubric"}">${esc(r.status)}</span>
-                </div>
-                <div class="btn-row">
-                  ${
-                    r.status === "NEW"
-                      ? `<button type="button" class="btn btn-primary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="approve">${esc(t("approve30d"))}</button>`
-                      : `<button type="button" class="btn btn-primary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="mark_paid">${esc(t("renew30d"))}</button>`
-                  }
-                  <button type="button" class="btn btn-secondary btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="mark_left">${esc(t("markLeft"))}</button>
-                  <button type="button" class="btn btn-danger btn-sm adm-act-btn" data-tg="${esc(r.tg_id)}" data-act="reject">${esc(t("rejectBtn"))}</button>
-                </div>
-              </div>
-            `
-                  )
-                  .join("")
-              : `<div class="ledger-row"><p class="muted-text">—</p></div>`
-          }
-        </div>
+        <div id="admAccountsList" class="ledger-list"></div>
       </section>
     `;
+
+    renderAdminJobsBox(jobs);
+    renderAdminPdfsList();
+    renderAdminAccountsList();
+
+    if ((jobs.sync && jobs.sync.running) || (jobs.verify && jobs.verify.running)) {
+      startAdminJobPolling();
+    } else {
+      stopAdminJobPolling();
+    }
+
+    document.getElementById("btnAdminRefreshAll").addEventListener("click", () => renderAdminView(true));
+
+    document.getElementById("btnAdminSyncDrive").addEventListener("click", async () => {
+      try {
+        const res = await apiFetch("/api/admin/sync-drive", { method: "POST" });
+        if (res.jobs) {
+          state.adminOverview.jobs = res.jobs;
+          renderAdminJobsBox(res.jobs);
+        }
+        startAdminJobPolling();
+        showToast(res.already_running ? res.detail : "Google Drive sync started...");
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+
+    const triggerVerify = async (force) => {
+      try {
+        const res = await apiFetch("/api/admin/verify-links", {
+          method: "POST",
+          body: JSON.stringify({ force }),
+        });
+        if (res.jobs) {
+          state.adminOverview.jobs = res.jobs;
+          renderAdminJobsBox(res.jobs);
+        }
+        startAdminJobPolling();
+        showToast(res.already_running ? res.detail : "PDF verification started...");
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    };
+    document.getElementById("btnAdminVerifyLinks").addEventListener("click", () => triggerVerify(false));
+    document.getElementById("btnAdminForceVerify").addEventListener("click", () => triggerVerify(true));
+
+    view.querySelectorAll(".adm-pdf-filter-btn").forEach((b) => {
+      b.addEventListener("click", () => {
+        state.adminPdfFilter = b.dataset.pf;
+        state.adminPdfLimit = 40;
+        view.querySelectorAll(".adm-pdf-filter-btn").forEach((x) =>
+          x.classList.toggle("active", x.dataset.pf === state.adminPdfFilter)
+        );
+        renderAdminPdfsList();
+      });
+    });
+
+    document.getElementById("admPdfSearchInput").addEventListener("input", (e) => {
+      state.adminPdfSearch = e.target.value;
+      state.adminPdfLimit = 40;
+      renderAdminPdfsList();
+    });
 
     document.getElementById("btnSaveAdminCfg").addEventListener("click", async () => {
       try {
@@ -2466,30 +2835,16 @@ if (state.auth && (state.auth.registered || state.auth.ok)) {
     view.querySelectorAll(".adm-filter-btn").forEach((b) => {
       b.addEventListener("click", () => {
         state.adminAccountFilter = b.dataset.st;
-        renderAdminView(false);
+        view.querySelectorAll(".adm-filter-btn").forEach((x) =>
+          x.classList.toggle("active", x.dataset.st === state.adminAccountFilter)
+        );
+        renderAdminAccountsList();
       });
     });
 
     document.getElementById("admSearchInput").addEventListener("input", (e) => {
       state.adminAccountSearch = e.target.value;
-      renderAdminView(false);
-    });
-
-    view.querySelectorAll(".adm-act-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        try {
-          await apiFetch("/api/admin/student-action", {
-            method: "POST",
-            body: JSON.stringify({ tg_id: btn.dataset.tg, action: btn.dataset.act }),
-          });
-          showToast(t("actionDone"));
-          await renderAdminView(true);
-        } catch (err) {
-          showToast(err.message, true);
-          btn.disabled = false;
-        }
-      });
+      renderAdminAccountsList();
     });
   }
 
