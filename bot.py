@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 
 PENDING_BROADCASTS = {}
 billing_task = None
-_BG_JOBS = {"verify": False, "sync": False}
+_BG_JOBS = {"verify": False, "sync": False, "reclassify": False}
 _BG_TASKS: set[asyncio.Task] = set()
 
 JOB_STATUS = {
@@ -115,6 +115,13 @@ JOB_STATUS = {
         "updated_at": "",
         "ok": None,
         "has_more": False,
+    },
+    "reclassify": {
+        "running": False,
+        "message": "Idle",
+        "last_summary": "",
+        "updated_at": "",
+        "ok": None,
     },
 }
 
@@ -159,6 +166,7 @@ def get_job_status() -> dict:
     return {
         "sync": dict(JOB_STATUS["sync"]),
         "verify": dict(JOB_STATUS["verify"]),
+        "reclassify": dict(JOB_STATUS["reclassify"]),
     }
 
 
@@ -970,7 +978,7 @@ async def billing_scheduler_loop(bot):
 
 
 # ==============================================================================
-# 6. STATS, BROADCASTS, BACKGROUND SMART LINK VERIFIER & DRIVE SYNC
+# 6. STATS, BROADCASTS, BACKGROUND VERIFY, SYNC & RECLASSIFY
 # ==============================================================================
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -1502,9 +1510,9 @@ def compute_exam_answer_links(all_rows_with_headers: list[list[str]]):
 
 
 def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
-    results, folders_to_visit = [], [folder_id]
+    results, folders_to_visit = [], [(folder_id, "")]
     while folders_to_visit:
-        current_folder = folders_to_visit.pop(0)
+        current_folder, current_path = folders_to_visit.pop(0)
         page_token = None
         while True:
             resp = drive_service.files().list(
@@ -1514,8 +1522,10 @@ def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
             ).execute()
             for f in resp.get("files", []):
                 if f.get("mimeType") == "application/vnd.google-apps.folder":
-                    folders_to_visit.append(f["id"])
+                    sub_path = f"{current_path}/{f['name']}" if current_path else f["name"]
+                    folders_to_visit.append((f["id"], sub_path))
                 else:
+                    f["folder_path"] = current_path
                     results.append(f)
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -1572,7 +1582,13 @@ async def _run_sync_drive_bg(status_msg=None):
                     office_file = ext_map.get("pptx") or ext_map.get("docx")
                     new_pdf_id = await convert_office_via_apps_script(office_file["id"])
                     if new_pdf_id:
-                        ext_map["pdf"] = {"id": new_pdf_id, "name": office_file["name"].rsplit(".", 1)[0] + ".pdf", "size": office_file.get("size", "0"), "md5Checksum": new_pdf_id}
+                        ext_map["pdf"] = {
+                            "id": new_pdf_id,
+                            "name": office_file["name"].rsplit(".", 1)[0] + ".pdf",
+                            "size": office_file.get("size", "0"),
+                            "md5Checksum": new_pdf_id,
+                            "folder_path": office_file.get("folder_path", ""),
+                        }
                         converted_count += 1
 
         next_num, new_rows, twin_updates = len(existing_rows), [], []
@@ -1584,7 +1600,7 @@ async def _run_sync_drive_bg(status_msg=None):
             primary = pdf_file or office_file
             if not primary:
                 continue
-            meta = classify_material(primary["name"])
+            meta = classify_material(primary["name"], folder_path=primary.get("folder_path", ""))
             doc_id = f"DOC-{next_num:04d}"
             next_num += 1
             formats = [fmt for fmt, cond in [("PDF", pdf_file), ("PPTX", "pptx" in ext_map), ("DOCX", "docx" in ext_map)] if cond]
@@ -1664,6 +1680,114 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     _spawn_bg_task(_run_sync_drive_bg(status_msg=status_msg))
 
 
+async def _run_reclassify_bg(status_msg=None):
+    try:
+        _set_job_status("reclassify", running=True, message="Loading library & Drive folders...", ok=None)
+
+        def _prepare():
+            _, pdf_sheet = get_sheets()
+            rows = pdf_sheet.get_all_values()
+            drive_paths = {}
+            if DRIVE_FOLDER_ID:
+                try:
+                    for f in list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID):
+                        drive_paths[f["id"]] = f.get("folder_path", "")
+                except Exception as e:
+                    logger.warning(f"Drive path lookup skipped during reclassify: {e}")
+            return pdf_sheet, rows, drive_paths
+
+        pdf_sheet, rows, drive_paths = await asyncio.to_thread(_prepare)
+        total = max(0, len(rows) - 1)
+        _set_job_status("reclassify", running=True, message=f"Re-classifying {total} PDF rows...")
+
+        updates = []
+        changed_rows = 0
+        for idx, row in enumerate(rows[1:], start=2):
+            r = row + [""] * (22 - len(row))
+            if not r[0] or not r[1]:
+                continue
+            fpath = drive_paths.get(r[15]) or drive_paths.get(r[16]) or ""
+            meta = classify_material(r[1], folder_path=fpath)
+
+            new_c_to_j = [
+                meta["grade"],
+                meta["stream"],
+                meta["subject"],
+                meta["category"],
+                meta["year"],
+                meta["exam_tag"],
+                meta["round_or_code"],
+                meta["link_key"],
+            ]
+            new_l = meta["has_embedded_answer"]
+
+            if r[2:10] != new_c_to_j or r[11] != new_l:
+                changed_rows += 1
+                if r[2:10] != new_c_to_j:
+                    updates.append({"range": f"C{idx}:J{idx}", "values": [new_c_to_j]})
+                if r[11] != new_l:
+                    updates.append({"range": f"L{idx}", "values": [[new_l]]})
+
+        _set_job_status("reclassify", running=True, message=f"Saving {changed_rows} updated row(s) to Google Sheet...")
+
+        def _commit():
+            if updates:
+                for i in range(0, len(updates), 200):
+                    pdf_sheet.batch_update(updates[i : i + 200])
+            link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
+            if link_updates:
+                for i in range(0, len(link_updates), 200):
+                    pdf_sheet.batch_update(link_updates[i : i + 200])
+            return len(link_updates) // 2
+
+        new_pairs = await asyncio.to_thread(_commit)
+        webapp_router.invalidate_library_cache()
+
+        summary_txt = f"Updated: {changed_rows}/{total} rows | New Candidate Pairs: {new_pairs}"
+        _set_job_status("reclassify", running=False, message="Finished", last_summary=summary_txt, ok=True)
+
+        if status_msg:
+            await status_msg.edit_text(
+                f"<b>PDF Re-Classification Complete</b>\n\n"
+                f"<b>Updated:</b> {changed_rows} / {total} rows\n"
+                f"<b>New Candidate Pairs:</b> {new_pairs}\n"
+                f"<i>Preserved Exam_Keys, Is_Trial, Verified Links &amp; Telegram_File_IDs.</i>",
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.exception("Background reclassify failed")
+        err_short = str(e)[:800]
+        _set_job_status("reclassify", running=False, message="Failed", last_summary=f"Error: {err_short}", ok=False)
+        if status_msg:
+            try:
+                await status_msg.edit_text(f"Re-classify failed: <code>{html.escape(err_short)}</code>", parse_mode="HTML")
+            except Exception:
+                pass
+    finally:
+        _BG_JOBS["reclassify"] = False
+
+
+def trigger_reclassify_job() -> dict:
+    if _BG_JOBS["reclassify"]:
+        return {"ok": True, "started": False, "already_running": True, "detail": "Re-classification is already running in the background."}
+    _BG_JOBS["reclassify"] = True
+    _set_job_status("reclassify", running=True, message="Starting re-classification...", ok=None)
+    _spawn_bg_task(_run_reclassify_bg(status_msg=None))
+    return {"ok": True, "started": True}
+
+
+async def reclassify_library_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    if _BG_JOBS["reclassify"]:
+        await update.message.reply_text("Re-classification is already running in the background.")
+        return
+    _BG_JOBS["reclassify"] = True
+    _set_job_status("reclassify", running=True, message="Starting re-classification...", ok=None)
+    status_msg = await update.message.reply_text("Re-classifying existing PDF_Library rows in the background...")
+    _spawn_bg_task(_run_reclassify_bg(status_msg=status_msg))
+
+
 async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post = update.channel_post
     if not post or not post.document or not post.document.file_name:
@@ -1721,6 +1845,7 @@ webapp_router = create_webapp_router(
     get_job_status_fn=get_job_status,
     trigger_sync_drive_fn=trigger_sync_drive_job,
     trigger_verify_links_fn=trigger_verify_links_job,
+    trigger_reclassify_fn=trigger_reclassify_job,
 )
 app.include_router(webapp_router)
 
@@ -1736,6 +1861,7 @@ ptb_app.add_handler(CommandHandler("stats", stats_command))
 ptb_app.add_handler(CommandHandler("broadcast", broadcast_command))
 ptb_app.add_handler(CommandHandler("sync_drive", sync_drive_command))
 ptb_app.add_handler(CommandHandler("verify_links", verify_links_command))
+ptb_app.add_handler(CommandHandler("reclassify_library", reclassify_library_command))
 ptb_app.add_handler(CommandHandler("review_links", review_links_command))
 ptb_app.add_handler(CommandHandler("end_launch", end_launch_command))
 ptb_app.add_handler(CommandHandler("reopen_launch", reopen_launch_command))
