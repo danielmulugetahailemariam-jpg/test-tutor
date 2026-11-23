@@ -121,6 +121,8 @@ JOB_STATUS = {
 _SHEETS_LOCK = threading.Lock()
 _SHEETS_READY = False
 _CACHED_SHEET_ID = None
+_CACHED_CLIENT = None
+_CACHED_WS = None
 
 
 def _safe_float(val) -> float:
@@ -182,12 +184,12 @@ def ensure_headers(sheet, expected_headers):
         sheet.update(values=[expected_headers], range_name="A1")
 
 
-def get_or_create_worksheet(sheet_doc, title: str, headers: list[str], defaults: dict | None = None):
+def get_or_create_worksheet(sheet_doc, ws_map: dict, title: str, headers: list[str], defaults: dict | None = None):
     created = False
-    try:
-        ws = sheet_doc.worksheet(title)
-    except gspread.WorksheetNotFound:
+    ws = ws_map.get(title)
+    if ws is None:
         ws = sheet_doc.add_worksheet(title=title, rows=1000, cols=max(26, len(headers)))
+        ws_map[title] = ws
         created = True
     ensure_headers(ws, headers)
     if created and defaults:
@@ -207,60 +209,36 @@ def _get_spreadsheet(client):
     return doc
 
 
-def _ensure_all_tabs_once(sheet_doc):
-    global _SHEETS_READY
-    if _SHEETS_READY:
-        return
+def get_all_worksheets():
+    global _SHEETS_READY, _CACHED_CLIENT, _CACHED_WS
+    if _SHEETS_READY and _CACHED_WS is not None:
+        return _CACHED_WS
+
     with _SHEETS_LOCK:
-        if _SHEETS_READY:
-            return
-        get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
-        get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
-        get_or_create_worksheet(sheet_doc, "Exam_Keys", KEY_HEADERS)
-        get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
-        get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
-        get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
-        get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
-        get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
+        if _SHEETS_READY and _CACHED_WS is not None:
+            return _CACHED_WS
+        if _CACHED_CLIENT is None:
+            _CACHED_CLIENT = gspread.authorize(get_credentials())
+        sheet_doc = _get_spreadsheet(_CACHED_CLIENT)
+        ws_map = {ws.title: ws for ws in sheet_doc.worksheets()}
+
+        reg_ws = get_or_create_worksheet(sheet_doc, ws_map, "Registrations", REG_HEADERS)
+        pdf_ws = get_or_create_worksheet(sheet_doc, ws_map, "PDF_Library", PDF_HEADERS)
+        key_ws = get_or_create_worksheet(sheet_doc, ws_map, "Exam_Keys", KEY_HEADERS)
+        ana_ws = get_or_create_worksheet(sheet_doc, ws_map, "Analytics", ANALYTICS_HEADERS)
+        cfg_ws = get_or_create_worksheet(sheet_doc, ws_map, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
+        prog_ws = get_or_create_worksheet(sheet_doc, ws_map, "Student_Progress", PROGRESS_HEADERS)
+        stu_ws = get_or_create_worksheet(sheet_doc, ws_map, "Students", STUDENTS_HEADERS)
+        rpt_ws = get_or_create_worksheet(sheet_doc, ws_map, "Progress_Reports", REPORTS_HEADERS)
+
+        _CACHED_WS = (reg_ws, pdf_ws, key_ws, ana_ws, cfg_ws, prog_ws, stu_ws, rpt_ws)
         _SHEETS_READY = True
+        return _CACHED_WS
 
 
 def get_sheets():
-    client = gspread.authorize(get_credentials())
-    sheet_doc = _get_spreadsheet(client)
-    _ensure_all_tabs_once(sheet_doc)
-    return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
-
-
-def get_all_worksheets():
-    global _SHEETS_READY
-    client = gspread.authorize(get_credentials())
-    sheet_doc = _get_spreadsheet(client)
-    _ensure_all_tabs_once(sheet_doc)
-    try:
-        return (
-            sheet_doc.worksheet("Registrations"),
-            sheet_doc.worksheet("PDF_Library"),
-            sheet_doc.worksheet("Exam_Keys"),
-            sheet_doc.worksheet("Analytics"),
-            sheet_doc.worksheet("Config"),
-            sheet_doc.worksheet("Student_Progress"),
-            sheet_doc.worksheet("Students"),
-            sheet_doc.worksheet("Progress_Reports"),
-        )
-    except gspread.WorksheetNotFound:
-        _SHEETS_READY = False
-        _ensure_all_tabs_once(sheet_doc)
-        return (
-            sheet_doc.worksheet("Registrations"),
-            sheet_doc.worksheet("PDF_Library"),
-            sheet_doc.worksheet("Exam_Keys"),
-            sheet_doc.worksheet("Analytics"),
-            sheet_doc.worksheet("Config"),
-            sheet_doc.worksheet("Student_Progress"),
-            sheet_doc.worksheet("Students"),
-            sheet_doc.worksheet("Progress_Reports"),
-        )
+    reg_ws, pdf_ws, _, _, _, _, _, _ = get_all_worksheets()
+    return reg_ws, pdf_ws
 
 
 def get_config_dict(config_sheet=None) -> dict:
@@ -317,7 +295,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_username = normalize_username(update.effective_user.username or "")
     arg = context.args[0].strip() if context.args else ""
 
-    # 1. Explicit Child Invite Deep Link (/start child_xxxxxxxx)
     if arg.startswith("child_"):
         def _link_child():
             reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
@@ -1232,7 +1209,6 @@ async def _run_verify_links_bg(status_msg=None, force: bool = False):
                 if processed_since_flush >= 8:
                     processed_since_flush = 0
                     await asyncio.to_thread(_flush)
-                    webapp_router.invalidate_library_cache()
                     prog_txt = f"Downloads: {downloads_done}/{MAX_DOWNLOADS_PER_RUN} | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}"
                     _set_job_status("verify", running=True, message=prog_txt)
                     if status_msg:
