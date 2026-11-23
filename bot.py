@@ -2,18 +2,15 @@ import os
 import json
 import html
 import uuid
-import time
 import asyncio
 import logging
 import threading
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from urllib.parse import quote
 
 import httpx
 import gspread
-from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
@@ -95,45 +92,79 @@ DEFAULT_CONFIG = {
     "SEMESTER_DATE": "2027-01-25",
 }
 
-_TAB_DEFS = [
-    ("Registrations", REG_HEADERS, None),
-    ("PDF_Library", PDF_HEADERS, None),
-    ("Exam_Keys", KEY_HEADERS, None),
-    ("Analytics", ANALYTICS_HEADERS, None),
-    ("Config", CONFIG_HEADERS, DEFAULT_CONFIG),
-    ("Student_Progress", PROGRESS_HEADERS, None),
-    ("Students", STUDENTS_HEADERS, None),
-    ("Progress_Reports", REPORTS_HEADERS, None),
-]
-
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PENDING_BROADCASTS = {}
 billing_task = None
 _BG_JOBS = {"verify": False, "sync": False}
+_BG_TASKS: set[asyncio.Task] = set()
+
+JOB_STATUS = {
+    "sync": {
+        "running": False,
+        "message": "Idle",
+        "last_summary": "",
+        "updated_at": "",
+        "ok": None,
+    },
+    "verify": {
+        "running": False,
+        "message": "Idle",
+        "last_summary": "",
+        "updated_at": "",
+        "ok": None,
+        "has_more": False,
+    },
+}
 
 _SHEETS_LOCK = threading.Lock()
+_SHEETS_READY = False
 _CACHED_SHEET_ID = None
-_CACHED_CLIENT = None
-_CACHED_DOC = None
-_CACHED_WS_TUPLE = None
-_CACHE_BUILT_AT = 0.0
 
 
-def sheets_retry(fn, retries: int = 3):
-    for attempt in range(retries + 1):
-        try:
-            return fn()
-        except APIError as e:
-            code = getattr(getattr(e, "response", None), "status_code", None)
-            if code in (429, 500, 502, 503) or "429" in str(e):
-                if attempt < retries:
-                    delay = 2.0 * (2 ** attempt)
-                    logger.warning(f"Sheets API {code or 429}, retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                    continue
-            raise
+def _safe_float(val) -> float:
+    try:
+        return float(val) if val not in (None, "") else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _set_job_status(
+    kind: str,
+    *,
+    running: bool | None = None,
+    message: str | None = None,
+    last_summary: str | None = None,
+    ok: bool | None = None,
+    has_more: bool | None = None,
+):
+    st = JOB_STATUS[kind]
+    if running is not None:
+        st["running"] = running
+    if message is not None:
+        st["message"] = message
+    if last_summary is not None:
+        st["last_summary"] = last_summary
+    if ok is not None:
+        st["ok"] = ok
+    if has_more is not None:
+        st["has_more"] = has_more
+    st["updated_at"] = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_job_status() -> dict:
+    return {
+        "sync": dict(JOB_STATUS["sync"]),
+        "verify": dict(JOB_STATUS["verify"]),
+    }
+
+
+def _spawn_bg_task(coro):
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def get_credentials() -> Credentials:
@@ -145,84 +176,97 @@ def get_credentials() -> Credentials:
     return Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
 
 
-def _reset_ws_cache():
-    global _CACHED_CLIENT, _CACHED_DOC, _CACHED_WS_TUPLE, _CACHE_BUILT_AT
+def ensure_headers(sheet, expected_headers):
+    first_row = sheet.row_values(1)
+    if not first_row or len(first_row) < len(expected_headers):
+        sheet.update(values=[expected_headers], range_name="A1")
+
+
+def get_or_create_worksheet(sheet_doc, title: str, headers: list[str], defaults: dict | None = None):
+    created = False
+    try:
+        ws = sheet_doc.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = sheet_doc.add_worksheet(title=title, rows=1000, cols=max(26, len(headers)))
+        created = True
+    ensure_headers(ws, headers)
+    if created and defaults:
+        ws.append_rows([[k, v] for k, v in defaults.items()], value_input_option="USER_ENTERED")
+    return ws
+
+
+def _get_spreadsheet(client):
+    global _CACHED_SHEET_ID
+    if _CACHED_SHEET_ID:
+        try:
+            return client.open_by_key(_CACHED_SHEET_ID)
+        except Exception:
+            _CACHED_SHEET_ID = None
+    doc = client.open(SHEET_NAME)
+    _CACHED_SHEET_ID = doc.id
+    return doc
+
+
+def _ensure_all_tabs_once(sheet_doc):
+    global _SHEETS_READY
+    if _SHEETS_READY:
+        return
     with _SHEETS_LOCK:
-        _CACHED_CLIENT = None
-        _CACHED_DOC = None
-        _CACHED_WS_TUPLE = None
-        _CACHE_BUILT_AT = 0.0
-
-
-def get_all_worksheets():
-    global _CACHED_SHEET_ID, _CACHED_CLIENT, _CACHED_DOC, _CACHED_WS_TUPLE, _CACHE_BUILT_AT
-    now = time.time()
-    if _CACHED_WS_TUPLE is not None and (now - _CACHE_BUILT_AT < 1800):
-        return _CACHED_WS_TUPLE
-
-    with _SHEETS_LOCK:
-        now = time.time()
-        if _CACHED_WS_TUPLE is not None and (now - _CACHE_BUILT_AT < 1800):
-            return _CACHED_WS_TUPLE
-
-        client = gspread.authorize(get_credentials())
-        if _CACHED_SHEET_ID:
-            try:
-                doc = client.open_by_key(_CACHED_SHEET_ID)
-            except Exception:
-                _CACHED_SHEET_ID = None
-                doc = sheets_retry(lambda: client.open(SHEET_NAME))
-                _CACHED_SHEET_ID = doc.id
-        else:
-            doc = sheets_retry(lambda: client.open(SHEET_NAME))
-            _CACHED_SHEET_ID = doc.id
-
-        # 1 single metadata read for all existing tabs
-        existing = {ws.title: ws for ws in sheets_retry(doc.worksheets)}
-        ws_list = []
-        created_titles = set()
-        for title, headers, _ in _TAB_DEFS:
-            ws = existing.get(title)
-            if ws is None:
-                ws = sheets_retry(
-                    lambda t=title, h=headers: doc.add_worksheet(title=t, rows=1000, cols=max(26, len(h)))
-                )
-                created_titles.add(title)
-            ws_list.append(ws)
-
-        # 1 single batch read to check row-1 headers across all 8 tabs
-        header_ranges = [f"{title}!1:1" for title, _, _ in _TAB_DEFS]
-        batch_res = sheets_retry(lambda: doc.values_batch_get(header_ranges))
-        value_ranges = batch_res.get("valueRanges", [])
-
-        for idx, (title, expected_headers, defaults) in enumerate(_TAB_DEFS):
-            vals = value_ranges[idx].get("values", []) if idx < len(value_ranges) else []
-            first_row = vals[0] if vals else []
-            if not first_row or len(first_row) < len(expected_headers):
-                sheets_retry(lambda w=ws_list[idx], h=expected_headers: w.update(values=[h], range_name="A1"))
-            if title in created_titles and defaults:
-                sheets_retry(
-                    lambda w=ws_list[idx], d=defaults: w.append_rows(
-                        [[k, v] for k, v in d.items()], value_input_option="USER_ENTERED"
-                    )
-                )
-
-        _CACHED_CLIENT = client
-        _CACHED_DOC = doc
-        _CACHED_WS_TUPLE = tuple(ws_list)
-        _CACHE_BUILT_AT = time.time()
-        return _CACHED_WS_TUPLE
+        if _SHEETS_READY:
+            return
+        get_or_create_worksheet(sheet_doc, "Registrations", REG_HEADERS)
+        get_or_create_worksheet(sheet_doc, "PDF_Library", PDF_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Exam_Keys", KEY_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Analytics", ANALYTICS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Config", CONFIG_HEADERS, DEFAULT_CONFIG)
+        get_or_create_worksheet(sheet_doc, "Student_Progress", PROGRESS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Students", STUDENTS_HEADERS)
+        get_or_create_worksheet(sheet_doc, "Progress_Reports", REPORTS_HEADERS)
+        _SHEETS_READY = True
 
 
 def get_sheets():
-    reg_sheet, pdf_sheet, *_ = get_all_worksheets()
-    return reg_sheet, pdf_sheet
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    return sheet_doc.worksheet("Registrations"), sheet_doc.worksheet("PDF_Library")
+
+
+def get_all_worksheets():
+    global _SHEETS_READY
+    client = gspread.authorize(get_credentials())
+    sheet_doc = _get_spreadsheet(client)
+    _ensure_all_tabs_once(sheet_doc)
+    try:
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
+    except gspread.WorksheetNotFound:
+        _SHEETS_READY = False
+        _ensure_all_tabs_once(sheet_doc)
+        return (
+            sheet_doc.worksheet("Registrations"),
+            sheet_doc.worksheet("PDF_Library"),
+            sheet_doc.worksheet("Exam_Keys"),
+            sheet_doc.worksheet("Analytics"),
+            sheet_doc.worksheet("Config"),
+            sheet_doc.worksheet("Student_Progress"),
+            sheet_doc.worksheet("Students"),
+            sheet_doc.worksheet("Progress_Reports"),
+        )
 
 
 def get_config_dict(config_sheet=None) -> dict:
     if config_sheet is None:
         _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
-    rows = sheets_retry(config_sheet.get_all_values)[1:]
+    rows = config_sheet.get_all_values()[1:]
     cfg = dict(DEFAULT_CONFIG)
     for r in rows:
         if len(r) >= 2 and r[0].strip():
@@ -232,12 +276,12 @@ def get_config_dict(config_sheet=None) -> dict:
 
 def set_config_value(key: str, value: str):
     _, _, _, _, config_sheet, _, _, _ = get_all_worksheets()
-    rows = sheets_retry(config_sheet.get_all_values)
+    rows = config_sheet.get_all_values()
     for idx, r in enumerate(rows[1:], start=2):
         if r and r[0].strip() == key:
-            sheets_retry(lambda: config_sheet.update_cell(idx, 2, value))
+            config_sheet.update_cell(idx, 2, value)
             return
-    sheets_retry(lambda: config_sheet.append_row([key, value]))
+    config_sheet.append_row([key, value])
 
 
 def get_drive_service():
@@ -261,8 +305,8 @@ def referral_invite_url(ref_code: str) -> str:
 # 1. TRILINGUAL /START LAUNCHER, CHILD LINKING & REFERRAL COMMAND
 # ==============================================================================
 def find_registration_by_tg_id(reg_sheet, tg_id: int):
-    for idx, row in enumerate(sheets_retry(reg_sheet.get_all_values)[1:], start=2):
-        r = row + [""] * max(0, 19 - len(row))
+    for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+        r = row + [""] * (19 - len(row))
         if str(r[6]).strip() == str(tg_id):
             return idx, r
     return None
@@ -273,36 +317,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_username = normalize_username(update.effective_user.username or "")
     arg = context.args[0].strip() if context.args else ""
 
+    # 1. Explicit Child Invite Deep Link (/start child_xxxxxxxx)
     if arg.startswith("child_"):
         def _link_child():
             reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
-            batch = sheets_retry(lambda: reg_sheet.spreadsheet.values_batch_get(["Registrations!A:S", "Students!A:K"]))
-            vrs = batch.get("valueRanges", [])
-            reg_rows = vrs[0].get("values", []) if len(vrs) > 0 else []
-            stu_rows = vrs[1].get("values", []) if len(vrs) > 1 else []
-
-            for idx, row in enumerate(stu_rows[1:], start=2):
-                s = row + [""] * max(0, 11 - len(row))
+            reg_rows = reg_sheet.get_all_values()
+            for idx, row in enumerate(students_sheet.get_all_values()[1:], start=2):
+                s = row + [""] * (11 - len(row))
                 if s[8].strip() == arg:
-                    sheets_retry(lambda: students_sheet.update_cell(idx, 7, str(user_id)))
+                    students_sheet.update_cell(idx, 7, str(user_id))
                     parent_tg = s[5].strip()
                     p_status, p_app, p_exp, p_lang = "APPROVED", "", "", "en"
-                    already_reg = False
                     for rr in reg_rows[1:]:
-                        rp = rr + [""] * max(0, 19 - len(rr))
+                        rp = rr + [""] * (19 - len(rr))
                         if rp[6].strip() == parent_tg:
                             p_status = rp[4].strip().upper() or "NEW"
                             p_app, p_exp = rp[7], rp[8]
                             p_lang = rp[17] if rp[17] in ("en", "am", "om") else "en"
-                        if rp[6].strip() == str(user_id):
-                            already_reg = True
-                    if not already_reg:
+                            break
+                    if not find_registration_by_tg_id(reg_sheet, user_id):
                         my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
                         ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
-                        sheets_retry(lambda: reg_sheet.append_row([
+                        reg_sheet.append_row([
                             max(1, len(reg_rows)), s[1], s[2], "", p_status, ts, str(user_id),
                             p_app, p_exp, "0", "-1", s[3], my_code, "", "0", "student", s[4], p_lang, tg_username,
-                        ]))
+                        ])
                     return s[1], s[2], parent_tg
             return None
 
@@ -330,56 +369,56 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    if arg.startswith("ref_"):
-        ref_param = arg[4:].upper()
-    elif arg.lower() == "parent":
-        ref_param = "parent"
-    else:
-        ref_param = ""
+    ref_param = arg[4:].upper() if arg.startswith("ref_") else ""
 
-    # Use shared memory cache first (0 Google Sheets Reads!)
-    existing_name = None
-    unlinked_match = None
-    get_bundle_fn = getattr(webapp_router, "get_reg_bundle", None)
-    if get_bundle_fn is not None:
-        bundle = await get_bundle_fn()
-        rec = bundle["by_tg"].get(str(user_id))
-        child_rec = bundle["child_by_tg"].get(str(user_id))
-        if rec:
-            existing_name = rec["name"]
-        elif child_rec:
-            existing_name = child_rec["student_name"]
-        elif tg_username:
-            for s in bundle["all_students"]:
-                if not s["child_tg_id"] and normalize_username(s["child_contact"]) == tg_username and s["parent_tg_id"] != str(user_id):
-                    unlinked_match = s
+    def _check_or_autolink():
+        reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
+        reg_rows = reg_sheet.get_all_values()
+        reg = None
+        for idx, row in enumerate(reg_rows[1:], start=2):
+            r = row + [""] * (19 - len(row))
+            if str(r[6]).strip() == str(user_id):
+                reg = (idx, r)
+                break
+
+        stu_rows = students_sheet.get_all_values()
+        child_match = None
+        for s_idx, row in enumerate(stu_rows[1:], start=2):
+            s = row + [""] * (11 - len(row))
+            if s[6].strip() == str(user_id):
+                child_match = s
+                break
+
+        auto_linked = None
+        if not reg and not child_match and tg_username:
+            for s_idx, row in enumerate(stu_rows[1:], start=2):
+                s = row + [""] * (11 - len(row))
+                if not s[6].strip() and normalize_username(s[7]) == tg_username and s[5].strip() != str(user_id):
+                    students_sheet.update_cell(s_idx, 7, str(user_id))
+                    parent_tg = s[5].strip()
+                    p_status, p_app, p_exp, p_lang = "NEW", "", "", "en"
+                    for rr in reg_rows[1:]:
+                        rp = rr + [""] * (19 - len(rr))
+                        if rp[6].strip() == parent_tg:
+                            p_status = rp[4].strip().upper() or "NEW"
+                            p_app, p_exp = rp[7], rp[8]
+                            p_lang = rp[17] if rp[17] in ("en", "am", "om") else "en"
+                            break
+                    my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
+                    ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
+                    reg_sheet.append_row([
+                        max(1, len(reg_rows)), s[1], s[2], "", p_status, ts, str(user_id),
+                        p_app, p_exp, "0", "-1", s[3], my_code, "", "0", "student", s[4], p_lang, tg_username,
+                    ])
+                    auto_linked = (s[1], s[2], parent_tg)
                     break
 
-    auto_linked = None
-    if unlinked_match:
-        def _do_autolink():
-            reg_sheet, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
-            sheets_retry(lambda: students_sheet.update_cell(unlinked_match["row_idx"], 7, str(user_id)))
-            parent_tg = unlinked_match["parent_tg_id"]
-            p_rec = bundle["by_tg"].get(parent_tg, {})
-            p_status = p_rec.get("status", "NEW")
-            p_app = p_rec.get("approved_at", "")
-            p_exp = p_rec.get("expires_on", "")
-            p_lang = p_rec.get("lang", "en")
-            my_code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-            ts = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
-            next_id = max(1, len(bundle["all_regs"]) + 1)
-            sheets_retry(lambda: reg_sheet.append_row([
-                next_id, unlinked_match["student_name"], unlinked_match["grade"], "", p_status, ts, str(user_id),
-                p_app, p_exp, "0", "-1", unlinked_match["stream"], my_code, "", "0", "student",
-                unlinked_match["format"], p_lang, tg_username,
-            ]))
-            return unlinked_match["student_name"], unlinked_match["grade"], parent_tg
+        return reg, child_match, auto_linked
 
-        auto_linked = await asyncio.to_thread(_do_autolink)
-        webapp_router.invalidate_reg_cache()
+    existing_reg, child_match, auto_linked = await asyncio.to_thread(_check_or_autolink)
 
     if auto_linked:
+        webapp_router.invalidate_reg_cache()
         c_name, c_grade, p_tg = auto_linked
         if p_tg:
             try:
@@ -401,9 +440,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if existing_name:
+    if existing_reg or child_match:
+        name = existing_reg[1][1] if existing_reg else child_match[1]
         await update.message.reply_text(
-            f"<b>Welcome back, {html.escape(existing_name)}! | እንኳን ደህና መጡ! | Baga nagaan deebitan!</b>\n\n"
+            f"<b>Welcome back, {html.escape(name)}! | እንኳን ደህና መጡ! | Baga nagaan deebitan!</b>\n\n"
             f"Tap below to open your <b>Qelal Learning (ቀላል)</b> Library, Quizzes, Study Plans &amp; Progress Dashboard.\n\n"
             f"Call: <code>+251 933 510 682</code> / <code>+251 988 666 328</code>",
             reply_markup=webapp_keyboard("Open Qelal Hub · ቀላልን ክፈት · Bani"),
@@ -411,11 +451,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    ref_line = (
-        f"\n<b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n"
-        if (ref_param and ref_param != "parent")
-        else ""
-    )
+    ref_line = f"\n<b>Referral Code Applied:</b> <code>{html.escape(ref_param)}</code>\n" if ref_param else ""
     welcome_msg = (
         f"<b>QELAL LEARNING (ቀላል) — Bishoftu Study &amp; Exam Hub</b>\n"
         f"<i>Grades 1–12 · Grade 6 &amp; 8 Ministry · Grade 12 ESSLCE</i>\n"
@@ -455,7 +491,7 @@ async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = r[12].strip()
         if not code:
             code = f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-            sheets_retry(lambda: reg_sheet.update_cell(idx, 13, code))
+            reg_sheet.update_cell(idx, 13, code)
         count = int(r[14]) if r[14].isdigit() else 0
         return r[1], code, count
 
@@ -566,12 +602,12 @@ def credit_referrer_if_first_approval(reg_sheet, all_rows: list[list[str]], stud
         return None
 
     for idx, row in enumerate(all_rows[1:], start=2):
-        r = row + [""] * max(0, 19 - len(row))
+        r = row + [""] * (19 - len(row))
         if r[12].strip().upper() == referred_by and r[6].strip() != student_row[6].strip():
             new_cnt = (int(r[14]) if r[14].isdigit() else 0) + 1
             r[14] = str(new_cnt)
             all_rows[idx - 1] = r
-            sheets_retry(lambda: reg_sheet.update_cell(idx, 15, str(new_cnt)))
+            reg_sheet.update_cell(idx, 15, str(new_cnt))
             return int(r[6].strip()), r[1], referred_by, new_cnt, student_row[1]
     return None
 
@@ -600,7 +636,7 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def _fetch():
         reg_sheet, _ = get_sheets()
-        return sheets_retry(reg_sheet.get_all_values)
+        return reg_sheet.get_all_values()
 
     rows = await asyncio.to_thread(_fetch)
     new_leads = [row for row in rows[1:] if len(row) >= 5 and row[4].strip().upper() == "NEW"]
@@ -611,7 +647,7 @@ async def check_leads(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"<b>PENDING REGISTRATIONS ({len(new_leads)}):</b>\n\n"
     buttons = []
     for row in new_leads:
-        r = row + [""] * max(0, 19 - len(row))
+        r = row + [""] * (19 - len(row))
         role_tag = "Parent" if r[15] == "parent" else "Student"
         msg += f"• {role_tag}: <b>{html.escape(r[1])}</b> | {html.escape(r[2])} | <code>{html.escape(r[3])}</code>\n"
         if r[6].strip():
@@ -634,12 +670,12 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
     if data == "approve_all_new":
         def _approve_all():
             reg_sheet, _ = get_sheets()
-            rows = sheets_retry(reg_sheet.get_all_values)
+            rows = reg_sheet.get_all_values()
             updates, approved_students, ref_credits = [], [], []
             expires_str = (today + timedelta(days=30)).isoformat()
             today_str = today.isoformat()
             for idx, row in enumerate(rows[1:], start=2):
-                r = row + [""] * max(0, 19 - len(row))
+                r = row + [""] * (19 - len(row))
                 if r[4].strip().upper() == "NEW" and r[6].strip():
                     ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
                     updates.append({
@@ -656,7 +692,7 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
                     if c_info:
                         ref_credits.append(c_info)
             if updates:
-                sheets_retry(lambda: reg_sheet.batch_update(updates))
+                reg_sheet.batch_update(updates)
             return approved_students, ref_credits
 
         approved_list, ref_credits = await asyncio.to_thread(_approve_all)
@@ -680,9 +716,9 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
 
         def _activate_or_renew():
             reg_sheet, _ = get_sheets()
-            rows = sheets_retry(reg_sheet.get_all_values)
+            rows = reg_sheet.get_all_values()
             for idx, row in enumerate(rows[1:], start=2):
-                r = row + [""] * max(0, 19 - len(row))
+                r = row + [""] * (19 - len(row))
                 if r[6].strip() == tg_id_str:
                     prev_months = int(r[9]) if r[9].isdigit() else 0
                     new_months = prev_months + 1
@@ -697,14 +733,14 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
                     app_at = r[7] if (is_renewal and r[7]) else today.isoformat()
                     exp_str = new_expires.isoformat()
                     ref_code = r[12] or f"QELAL-{uuid.uuid4().hex[:5].upper()}"
-                    sheets_retry(lambda: reg_sheet.update(
+                    reg_sheet.update(
                         values=[[
                             "APPROVED", r[5], r[6], app_at, exp_str, str(new_months), "0",
                             r[11] or "General", ref_code, r[13], r[14] or "0",
                             r[15] or "student", r[16] or "Weekend Hub", r[17] or "en", r[18],
                         ]],
                         range_name=f"E{idx}:S{idx}",
-                    ))
+                    )
                     r[12] = ref_code
                     c_info = credit_referrer_if_first_approval(reg_sheet, rows, r)
                     return r, new_months, today.isoformat(), exp_str, c_info
@@ -735,9 +771,9 @@ async def handle_student_action_callback(update: Update, context: ContextTypes.D
 
         def _set_status():
             reg_sheet, _ = get_sheets()
-            for idx, row in enumerate(sheets_retry(reg_sheet.get_all_values)[1:], start=2):
+            for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
                 if len(row) >= 7 and row[6].strip() == tg_id_str:
-                    sheets_retry(lambda: reg_sheet.update_cell(idx, 5, new_status))
+                    reg_sheet.update_cell(idx, 5, new_status)
                     return row[1]
             return None
 
@@ -763,19 +799,15 @@ async def review_reports_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     def _fetch():
-        _, _, _, _, _, _, students_sheet, _ = get_all_worksheets()
-        batch = sheets_retry(lambda: students_sheet.spreadsheet.values_batch_get(["Students!A:K", "Progress_Reports!A:J"]))
-        vrs = batch.get("valueRanges", [])
-        stu_rows = vrs[0].get("values", []) if len(vrs) > 0 else []
-        rpt_rows = vrs[1].get("values", []) if len(vrs) > 1 else []
+        _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
         stu_map = {}
-        for row in stu_rows[1:]:
-            s = row + [""] * max(0, 11 - len(row))
+        for row in students_sheet.get_all_values()[1:]:
+            s = row + [""] * (11 - len(row))
             if s[0]:
                 stu_map[s[0]] = s
         pending = []
-        for idx, row in enumerate(rpt_rows[1:], start=2):
-            rp = row + [""] * max(0, 10 - len(row))
+        for idx, row in enumerate(reports_sheet.get_all_values()[1:], start=2):
+            rp = row + [""] * (10 - len(row))
             if rp[7].strip() == "Pending_Admin":
                 pending.append((idx, rp, stu_map.get(rp[1])))
         return pending[:5]
@@ -820,20 +852,20 @@ async def handle_report_decision(update: Update, context: ContextTypes.DEFAULT_T
 
     def _apply():
         _, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets()
-        rp = sheets_retry(lambda: reports_sheet.row_values(row_idx)) + [""] * 10
+        rp = reports_sheet.row_values(row_idx) + [""] * 10
         stu = None
-        for row in sheets_retry(students_sheet.get_all_values)[1:]:
+        for row in students_sheet.get_all_values()[1:]:
             if row and row[0] == rp[1]:
-                stu = row + [""] * max(0, 11 - len(row))
+                stu = row + [""] * (11 - len(row))
                 break
 
         if action == "rpt_approve":
             now_str = datetime.now(EAT_TZ).strftime("%Y-%m-%d %H:%M")
-            sheets_retry(lambda: reports_sheet.update(values=[["Approved", now_str]], range_name=f"H{row_idx}:I{row_idx}"))
+            reports_sheet.update(values=[["Approved", now_str]], range_name=f"H{row_idx}:I{row_idx}")
         elif action == "rpt_hold":
-            sheets_retry(lambda: reports_sheet.update_cell(row_idx, 8, "Held"))
+            reports_sheet.update_cell(row_idx, 8, "Held")
         else:
-            sheets_retry(lambda: reports_sheet.update_cell(row_idx, 8, "Skipped"))
+            reports_sheet.update_cell(row_idx, 8, "Skipped")
         return rp, stu
 
     rp, stu = await asyncio.to_thread(_apply)
@@ -876,8 +908,8 @@ async def run_daily_billing_check(bot):
     def _scan_billing():
         reg_sheet, _ = get_sheets()
         updates, alerts = [], []
-        for idx, row in enumerate(sheets_retry(reg_sheet.get_all_values)[1:], start=2):
-            r = row + [""] * max(0, 19 - len(row))
+        for idx, row in enumerate(reg_sheet.get_all_values()[1:], start=2):
+            r = row + [""] * (19 - len(row))
             status, tg_id, exp_str = r[4].strip().upper(), r[6].strip(), r[8].strip()
             if not tg_id or not exp_str or status not in ("APPROVED", "EXPIRED"):
                 continue
@@ -903,7 +935,7 @@ async def run_daily_billing_check(bot):
                 updates.append({"range": f"K{idx}", "values": [[str(elapsed_day)]]})
                 alerts.append(("AUTO_LEFT", r[1], r[2], r[3], tg_id, elapsed_day, days_left))
         if updates:
-            sheets_retry(lambda: reg_sheet.batch_update(updates))
+            reg_sheet.batch_update(updates)
         return alerts
 
     alerts = await asyncio.to_thread(_scan_billing)
@@ -951,7 +983,7 @@ async def check_billing_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def billing_scheduler_loop(bot):
-    await asyncio.sleep(60)
+    await asyncio.sleep(15)
     while True:
         try:
             await run_daily_billing_check(bot)
@@ -969,31 +1001,18 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.now(EAT_TZ).date()
 
     def _gather():
-        reg_sheet, *_ = get_all_worksheets()
-        batch = sheets_retry(
-            lambda: reg_sheet.spreadsheet.values_batch_get([
-                "Registrations!A:S",
-                "PDF_Library!A:V",
-                "Exam_Keys!A:F",
-                "Analytics!A:I",
-                "Config!A:B",
-                "Students!A:K",
-            ])
-        )
-        vrs = batch.get("valueRanges", [])
-        def vals(i):
-            return (vrs[i].get("values", []) if i < len(vrs) else [])[1:]
-
-        reg_rows, pdf_rows, key_rows, ana_rows, cfg_rows, stu_rows = (vals(0), vals(1), vals(2), vals(3), vals(4), vals(5))
-        cfg = dict(DEFAULT_CONFIG)
-        for cr in cfg_rows:
-            if len(cr) >= 2 and cr[0].strip():
-                cfg[cr[0].strip()] = cr[1].strip()
+        reg_sheet, pdf_sheet, keys_sheet, analytics_sheet, cfg_sheet, _, students_sheet, _ = get_all_worksheets()
+        reg_rows = reg_sheet.get_all_values()[1:]
+        pdf_rows = pdf_sheet.get_all_values()[1:]
+        key_rows = keys_sheet.get_all_values()[1:]
+        ana_rows = analytics_sheet.get_all_values()[1:]
+        stu_rows = students_sheet.get_all_values()[1:]
+        cfg = get_config_dict(cfg_sheet)
 
         counts = {"APPROVED": 0, "NEW": 0, "EXPIRED": 0, "LEFT": 0, "REJECTED": 0}
         expiring_soon, total_refs = [], 0
         for row in reg_rows:
-            r = row + [""] * max(0, 19 - len(row))
+            r = row + [""] * (19 - len(row))
             st = r[4].strip().upper() or "NEW"
             counts[st] = counts.get(st, 0) + 1
             if r[14].isdigit():
@@ -1085,8 +1104,8 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def _get_recipients():
         reg_sheet, _ = get_sheets()
         ids = []
-        for row in sheets_retry(reg_sheet.get_all_values)[1:]:
-            r = row + [""] * max(0, 19 - len(row))
+        for row in reg_sheet.get_all_values()[1:]:
+            r = row + [""] * (19 - len(row))
             if r[6].strip() and filter_fn(r):
                 ids.append(int(r[6].strip()))
         return list(dict.fromkeys(ids))
@@ -1156,22 +1175,20 @@ async def download_doc_bytes_safe(http_client: httpx.AsyncClient, creds: Credent
     return None
 
 
-async def _run_verify_links_bg(status_msg, force: bool = False):
+async def _run_verify_links_bg(status_msg=None, force: bool = False):
     MAX_DOWNLOADS_PER_RUN = 40
     try:
+        _set_job_status("verify", running=True, message="Loading PDF library & keys...", ok=None, has_more=False)
+
         def _load():
             _, pdf_sheet, keys_sheet, _, _, _, _, _ = get_all_worksheets()
-            batch = sheets_retry(lambda: pdf_sheet.spreadsheet.values_batch_get(["PDF_Library!A:V", "Exam_Keys!A:F"]))
-            vrs = batch.get("valueRanges", [])
-            pdf_rows = vrs[0].get("values", []) if len(vrs) > 0 else []
-            key_rows = vrs[1].get("values", []) if len(vrs) > 1 else []
             creds = get_credentials()
             if not creds.valid:
                 creds.refresh(GoogleAuthRequest())
-            return pdf_sheet, keys_sheet, pdf_rows, key_rows, creds
+            return pdf_sheet, keys_sheet, pdf_sheet.get_all_values(), keys_sheet.get_all_values(), creds
 
         pdf_sheet, keys_sheet, pdf_rows, key_rows, creds = await asyncio.to_thread(_load)
-        by_id = {(row + [""] * max(0, 22 - len(row)))[0]: (idx, row + [""] * max(0, 22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
+        by_id = {(row + [""] * (22 - len(row)))[0]: (idx, row + [""] * (22 - len(row))) for idx, row in enumerate(pdf_rows[1:], start=2) if row}
         existing_key_ids = {r[0] for r in key_rows[1:] if r}
 
         pdf_updates, new_keys = [], []
@@ -1184,10 +1201,10 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
         def _flush():
             if pdf_updates:
                 for i in range(0, len(pdf_updates), 200):
-                    sheets_retry(lambda b=pdf_updates[i : i + 200]: pdf_sheet.batch_update(b))
+                    pdf_sheet.batch_update(pdf_updates[i : i + 200])
                 pdf_updates.clear()
             if new_keys:
-                sheets_retry(lambda k=new_keys[:]: keys_sheet.append_rows(k, value_input_option="USER_ENTERED"))
+                keys_sheet.append_rows(new_keys, value_input_option="USER_ENTERED")
                 new_keys.clear()
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
@@ -1216,21 +1233,24 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
                     processed_since_flush = 0
                     await asyncio.to_thread(_flush)
                     webapp_router.invalidate_library_cache()
-                    try:
-                        await status_msg.edit_text(
-                            f"Verifying PDFs in background...\n"
-                            f"Downloads: <b>{downloads_done}/{MAX_DOWNLOADS_PER_RUN}</b> | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}",
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
+                    prog_txt = f"Downloads: {downloads_done}/{MAX_DOWNLOADS_PER_RUN} | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}"
+                    _set_job_status("verify", running=True, message=prog_txt)
+                    if status_msg:
+                        try:
+                            await status_msg.edit_text(
+                                f"Verifying PDFs in background...\n"
+                                f"Downloads: <b>{downloads_done}/{MAX_DOWNLOADS_PER_RUN}</b> | Verified: {verified_count + newly_discovered} | Removed: {rejected_count}",
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
 
             for doc_id, (row_idx, r) in by_id.items():
                 if downloads_done >= MAX_DOWNLOADS_PER_RUN:
                     reached_batch_limit = True
                     break
                 cat, linked_id, link_status = r[5], r[10], r[20]
-                size_mb = float(r[13]) if r[13] else 0.0
+                size_mb = _safe_float(r[13])
 
                 if cat != "Answer Sheet" and linked_id and linked_id in by_id:
                     if not force and link_status in ("AUTO_VERIFIED", "MANUAL_VERIFIED", "REJECTED_MISMATCH", "NEEDS_REVIEW") and (
@@ -1239,7 +1259,7 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
                         continue
 
                     ans_row_idx, ans_r = by_id[linked_id]
-                    ans_size = float(ans_r[13]) if ans_r[13] else 0.0
+                    ans_size = _safe_float(ans_r[13])
                     if size_mb > 25 or ans_size > 25:
                         pdf_updates.extend([{"range": f"U{row_idx}", "values": [["NEEDS_REVIEW"]]}, {"range": f"U{ans_row_idx}", "values": [["NEEDS_REVIEW"]]}])
                         review_count += 1
@@ -1290,7 +1310,7 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
                     if downloads_done >= MAX_DOWNLOADS_PER_RUN:
                         reached_batch_limit = True
                         break
-                    if ans_r[5] != "Answer Sheet" or ans_r[10] or (float(ans_r[13] or 0) > 25):
+                    if ans_r[5] != "Answer Sheet" or ans_r[10] or (_safe_float(ans_r[13]) > 25):
                         continue
                     if not force and ans_r[20] in ("NEEDS_REVIEW", "REJECTED_MISMATCH"):
                         continue
@@ -1307,7 +1327,7 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
                             break
                         if ex_r[5] not in ("Entrance Exam", "Model Exam", "Pilot Exam", "Practice / Weekly Exam") or ex_r[10] or ex_r[11] == "Yes":
                             continue
-                        if ex_r[4] != ans_r[4] or (float(ex_r[13] or 0) > 25):
+                        if ex_r[4] != ans_r[4] or (_safe_float(ex_r[13]) > 25):
                             continue
                         if ex_r[6] and ans_r[6] and ex_r[6] != ans_r[6]:
                             continue
@@ -1341,26 +1361,52 @@ async def _run_verify_links_bg(status_msg, force: bool = False):
         await asyncio.to_thread(_flush)
         webapp_router.invalidate_library_cache()
 
-        more_note = "\n\n<b>Batch limit reached (40 PDFs).</b> Run /verify_links again to continue the remaining files." if reached_batch_limit else ""
-        review_note = "\nSend /review_links to confirm scanned pairs." if review_count else ""
-
-        await status_msg.edit_text(
-            f"<b>PDF Content Verification Finished</b>\n\n"
-            f"<b>Auto-Verified:</b> {verified_count} (+{newly_discovered} matched by content)\n"
-            f"<b>False Links Removed:</b> {rejected_count}\n"
-            f"<b>Needs Review:</b> {review_count}\n"
-            f"<b>Total Quiz Keys Saved:</b> {len(existing_key_ids)} ({embedded_keys_parsed} embedded)"
-            f"{more_note}{review_note}",
-            parse_mode="HTML",
+        summary_txt = (
+            f"Auto-Verified: {verified_count + newly_discovered} | Removed: {rejected_count} | "
+            f"Needs Review: {review_count} | Quiz Keys: {len(existing_key_ids)}"
+            + (" (Batch limit 40 reached — run again for remaining)" if reached_batch_limit else "")
         )
+        _set_job_status(
+            "verify",
+            running=False,
+            message="Finished",
+            last_summary=summary_txt,
+            ok=True,
+            has_more=reached_batch_limit,
+        )
+
+        if status_msg:
+            more_note = "\n\n<b>Batch limit reached (40 PDFs).</b> Run /verify_links again to continue the remaining files." if reached_batch_limit else ""
+            review_note = "\nSend /review_links to confirm scanned pairs." if review_count else ""
+            await status_msg.edit_text(
+                f"<b>PDF Content Verification Finished</b>\n\n"
+                f"<b>Auto-Verified:</b> {verified_count} (+{newly_discovered} matched by content)\n"
+                f"<b>False Links Removed:</b> {rejected_count}\n"
+                f"<b>Needs Review:</b> {review_count}\n"
+                f"<b>Total Quiz Keys Saved:</b> {len(existing_key_ids)} ({embedded_keys_parsed} embedded)"
+                f"{more_note}{review_note}",
+                parse_mode="HTML",
+            )
     except Exception as e:
         logger.exception("Background verify_links failed")
-        try:
-            await status_msg.edit_text(f"Verification stopped: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
-        except Exception:
-            pass
+        err_short = str(e)[:800]
+        _set_job_status("verify", running=False, message="Failed", last_summary=f"Error: {err_short}", ok=False, has_more=False)
+        if status_msg:
+            try:
+                await status_msg.edit_text(f"Verification stopped: <code>{html.escape(err_short)}</code>", parse_mode="HTML")
+            except Exception:
+                pass
     finally:
         _BG_JOBS["verify"] = False
+
+
+def trigger_verify_links_job(force: bool = False) -> dict:
+    if _BG_JOBS["verify"]:
+        return {"ok": True, "started": False, "already_running": True, "detail": "Verification is already running in the background."}
+    _BG_JOBS["verify"] = True
+    _set_job_status("verify", running=True, message="Starting PDF verification (batch of 40)...", ok=None, has_more=False)
+    _spawn_bg_task(_run_verify_links_bg(status_msg=None, force=force))
+    return {"ok": True, "started": True}
 
 
 async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1372,8 +1418,9 @@ async def verify_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     _BG_JOBS["verify"] = True
     force = bool(context.args and context.args[0].lower() == "force")
+    _set_job_status("verify", running=True, message="Starting PDF verification (batch of 40)...", ok=None, has_more=False)
     status_msg = await update.message.reply_text("Starting background PDF verification (batch of 40 PDFs, checkpointing as it goes)...")
-    asyncio.create_task(_run_verify_links_bg(status_msg, force=force))
+    _spawn_bg_task(_run_verify_links_bg(status_msg=status_msg, force=force))
 
 
 async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1382,13 +1429,13 @@ async def review_links_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     def _get_reviews():
         _, pdf_sheet = get_sheets()
-        rows = sheets_retry(pdf_sheet.get_all_values)[1:]
+        rows = pdf_sheet.get_all_values()[1:]
         by_id = {r[0]: r for r in rows if r}
         pairs = []
         for r in rows:
-            padded = r + [""] * max(0, 22 - len(r))
+            padded = r + [""] * (22 - len(r))
             if padded[20] == "NEEDS_REVIEW" and padded[5] != "Answer Sheet" and padded[10] in by_id:
-                pairs.append((padded, by_id[padded[10]] + [""] * max(0, 22 - len(by_id[padded[10]]))))
+                pairs.append((padded, by_id[padded[10]] + [""] * (22 - len(by_id[padded[10]]))))
         return pairs[:5]
 
     pairs = await asyncio.to_thread(_get_reviews)
@@ -1418,14 +1465,14 @@ async def link_review_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     def _apply():
         _, pdf_sheet = get_sheets()
         updates = []
-        for idx, r in enumerate(sheets_retry(pdf_sheet.get_all_values)[1:], start=2):
+        for idx, r in enumerate(pdf_sheet.get_all_values()[1:], start=2):
             if r and r[0] in (ex_id, ans_id):
                 if action == "link_ok":
                     updates.append({"range": f"U{idx}", "values": [["MANUAL_VERIFIED"]]})
                 else:
                     updates.extend([{"range": f"K{idx}", "values": [[""]]}, {"range": f"U{idx}", "values": [["REJECTED_MISMATCH"]]}])
         if updates:
-            sheets_retry(lambda: pdf_sheet.batch_update(updates))
+            pdf_sheet.batch_update(updates)
 
     await asyncio.to_thread(_apply)
     webapp_router.invalidate_library_cache()
@@ -1500,13 +1547,16 @@ def list_drive_files_recursive(drive_service, folder_id: str) -> list[dict]:
     return results
 
 
-async def _run_sync_drive_bg(status_msg):
+async def _run_sync_drive_bg(status_msg=None):
     try:
+        _set_job_status("sync", running=True, message="Scanning Google Drive folders...", ok=None)
+
         def _prepare_sync():
             _, pdf_sheet = get_sheets()
-            return pdf_sheet, sheets_retry(pdf_sheet.get_all_values), list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID)
+            return pdf_sheet, pdf_sheet.get_all_values(), list_drive_files_recursive(get_drive_service(), DRIVE_FOLDER_ID)
 
         pdf_sheet, existing_rows, drive_files = await asyncio.to_thread(_prepare_sync)
+        _set_job_status("sync", running=True, message=f"Found {len(drive_files)} file(s) in Drive. Classifying & deduplicating...")
 
         existing_drive_ids, existing_unique_keys, stem_to_row_idx = set(), set(), {}
         for idx, row in enumerate(existing_rows[1:], start=2):
@@ -1571,35 +1621,55 @@ async def _run_sync_drive_bg(status_msg):
                 office_file["id"] if office_file else "", "", primary.get("md5Checksum") or primary["id"], "", "", "",
             ])
 
+        _set_job_status("sync", running=True, message=f"Writing {len(new_rows)} new row(s) to Google Sheet...")
+
         def _write_and_link():
             if twin_updates:
-                sheets_retry(lambda: pdf_sheet.batch_update(twin_updates))
+                pdf_sheet.batch_update(twin_updates)
             if new_rows:
                 for i in range(0, len(new_rows), 250):
-                    sheets_retry(lambda b=new_rows[i : i + 250]: pdf_sheet.append_rows(b, value_input_option="USER_ENTERED"))
-            link_updates = compute_exam_answer_links(sheets_retry(pdf_sheet.get_all_values))
+                    pdf_sheet.append_rows(new_rows[i : i + 250], value_input_option="USER_ENTERED")
+            link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
             if link_updates:
-                sheets_retry(lambda: pdf_sheet.batch_update(link_updates))
+                pdf_sheet.batch_update(link_updates)
             return len(link_updates) // 2
 
         paired_count = await asyncio.to_thread(_write_and_link)
         webapp_router.invalidate_library_cache()
 
-        await status_msg.edit_text(
-            f"<b>Google Drive Sync Complete</b>\n\n"
-            f"<b>Added:</b> {len(new_rows)} | <b>Converted:</b> {converted_count}\n"
-            f"<b>Candidate Pairs:</b> {paired_count} | <b>Duplicates:</b> {skipped_duplicates} | <b>Excluded:</b> {skipped_excluded}\n\n"
-            f"Run /verify_links next to verify PDF pairs &amp; parse Quiz keys.",
-            parse_mode="HTML",
-        )
+        summary_txt = f"Added: {len(new_rows)} | Converted: {converted_count} | Candidate Pairs: {paired_count} | Duplicates: {skipped_duplicates} | Excluded: {skipped_excluded}"
+        _set_job_status("sync", running=False, message="Finished", last_summary=summary_txt, ok=True)
+
+        if status_msg:
+            await status_msg.edit_text(
+                f"<b>Google Drive Sync Complete</b>\n\n"
+                f"<b>Added:</b> {len(new_rows)} | <b>Converted:</b> {converted_count}\n"
+                f"<b>Candidate Pairs:</b> {paired_count} | <b>Duplicates:</b> {skipped_duplicates} | <b>Excluded:</b> {skipped_excluded}\n\n"
+                f"Run /verify_links next to verify PDF pairs &amp; parse Quiz keys.",
+                parse_mode="HTML",
+            )
     except Exception as e:
         logger.exception("Background sync_drive failed")
-        try:
-            await status_msg.edit_text(f"Drive sync failed: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
-        except Exception:
-            pass
+        err_short = str(e)[:800]
+        _set_job_status("sync", running=False, message="Failed", last_summary=f"Error: {err_short}", ok=False)
+        if status_msg:
+            try:
+                await status_msg.edit_text(f"Drive sync failed: <code>{html.escape(err_short)}</code>", parse_mode="HTML")
+            except Exception:
+                pass
     finally:
         _BG_JOBS["sync"] = False
+
+
+def trigger_sync_drive_job() -> dict:
+    if not DRIVE_FOLDER_ID:
+        return {"ok": False, "started": False, "detail": "DRIVE_FOLDER_ID is not set in environment variables."}
+    if _BG_JOBS["sync"]:
+        return {"ok": True, "started": False, "already_running": True, "detail": "Drive sync is already running in the background."}
+    _BG_JOBS["sync"] = True
+    _set_job_status("sync", running=True, message="Scanning Google Drive folder...", ok=None)
+    _spawn_bg_task(_run_sync_drive_bg(status_msg=None))
+    return {"ok": True, "started": True}
 
 
 async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1613,8 +1683,9 @@ async def sync_drive_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     _BG_JOBS["sync"] = True
+    _set_job_status("sync", running=True, message="Scanning Google Drive folder...", ok=None)
     status_msg = await update.message.reply_text("Scanning Google Drive folder in the background...")
-    asyncio.create_task(_run_sync_drive_bg(status_msg))
+    _spawn_bg_task(_run_sync_drive_bg(status_msg=status_msg))
 
 
 async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1633,20 +1704,20 @@ async def auto_categorize_file(update: Update, context: ContextTypes.DEFAULT_TYP
 
     def _append_and_link():
         _, pdf_sheet = get_sheets()
-        rows = sheets_retry(pdf_sheet.get_all_values)
+        rows = pdf_sheet.get_all_values()
         for r in rows[1:]:
             if len(r) >= 19 and r[18] == doc.file_unique_id:
                 return None
         doc_id = f"DOC-{len(rows):04d}"
-        sheets_retry(lambda: pdf_sheet.append_row([
+        pdf_sheet.append_row([
             doc_id, doc.file_name, meta["grade"], meta["stream"], meta["subject"],
             meta["category"], meta["year"], meta["exam_tag"], meta["round_or_code"],
             meta["link_key"], "", meta["has_embedded_answer"], ext, size_mb,
             "Telegram", "", "", doc.file_id, doc.file_unique_id, post_link, "", "",
-        ]))
-        link_updates = compute_exam_answer_links(sheets_retry(pdf_sheet.get_all_values))
+        ])
+        link_updates = compute_exam_answer_links(pdf_sheet.get_all_values())
         if link_updates:
-            sheets_retry(lambda: pdf_sheet.batch_update(link_updates))
+            pdf_sheet.batch_update(link_updates)
         return doc_id
 
     await asyncio.to_thread(_append_and_link)
@@ -1660,6 +1731,7 @@ async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_T
 # ==============================================================================
 # 7. FASTAPI APP, MINI APP ROUTER & LIFECYCLE
 # ==============================================================================
+app = FastAPI()
 ptb_app = Application.builder().token(BOT_TOKEN).updater(None).build()
 
 webapp_router = create_webapp_router(
@@ -1670,7 +1742,11 @@ webapp_router = create_webapp_router(
     get_all_worksheets_fn=get_all_worksheets,
     get_credentials_fn=get_credentials,
     eat_tz=EAT_TZ,
+    get_job_status_fn=get_job_status,
+    trigger_sync_drive_fn=trigger_sync_drive_job,
+    trigger_verify_links_fn=trigger_verify_links_job,
 )
+app.include_router(webapp_router)
 
 ptb_app.add_handler(CommandHandler("start", start_command))
 ptb_app.add_handler(CommandHandler("register", start_command))
@@ -1697,8 +1773,8 @@ ptb_app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.Document.A
 ptb_app.add_error_handler(telegram_error_handler)
 
 
-@asynccontextmanager
-async def lifespan(fastapi_app: FastAPI):
+@app.on_event("startup")
+async def startup_event():
     global billing_task, BOT_USERNAME
     await ptb_app.initialize()
     await ptb_app.start()
@@ -1715,18 +1791,15 @@ async def lifespan(fastapi_app: FastAPI):
             )
         except Exception as e:
             logger.warning(f"Menu button error: {e}")
-
     billing_task = asyncio.create_task(billing_scheduler_loop(ptb_app.bot))
-    yield
 
+
+@app.on_event("shutdown")
+async def shutdown_event():
     if billing_task:
         billing_task.cancel()
     await ptb_app.stop()
     await ptb_app.shutdown()
-
-
-app = FastAPI(lifespan=lifespan)
-app.include_router(webapp_router)
 
 
 @app.post(f"/{BOT_TOKEN}")
