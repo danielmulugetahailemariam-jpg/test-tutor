@@ -1097,7 +1097,7 @@ def create_webapp_router(
         resp_headers = {
             "Accept-Ranges": "bytes",
             "Content-Disposition": content_disposition_header("inline", fname),
-            "Cache-Control": "no-store",
+            "Cache-Control": "private, max-age=86400",
         }
         for h in ("content-length", "content-range"):
             if h in upstream_resp.headers:
