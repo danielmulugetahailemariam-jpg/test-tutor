@@ -57,6 +57,10 @@ def create_webapp_router(
     boot_ver = str(int(time.time()))
     no_cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
+    reg_lock = asyncio.Lock()
+    lib_lock = asyncio.Lock()
+    cfg_lock = asyncio.Lock()
+
     state = {
         "creds": None,
         "lib_cache": None,
@@ -145,10 +149,14 @@ def create_webapp_router(
 
     async def get_config() -> dict:
         now = time.time()
-        if state["cfg_cache"] is None or (now - state["cfg_cache_ts"] > 60):
-            state["cfg_cache"] = await asyncio.to_thread(_load_config_sync)
-            state["cfg_cache_ts"] = now
-        return state["cfg_cache"]
+        if state["cfg_cache"] is not None and (now - state["cfg_cache_ts"] <= 300):
+            return state["cfg_cache"]
+        async with cfg_lock:
+            now = time.time()
+            if state["cfg_cache"] is None or (now - state["cfg_cache_ts"] > 300):
+                state["cfg_cache"] = await asyncio.to_thread(_load_config_sync)
+                state["cfg_cache_ts"] = time.time()
+            return state["cfg_cache"]
 
     def _load_reg_and_students_sync():
         reg_sheet, _, _, _, _, _, students_sheet, reports_sheet = get_all_worksheets_fn()
@@ -250,10 +258,14 @@ def create_webapp_router(
 
     async def get_reg_bundle() -> dict:
         now = time.time()
-        if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 30):
-            state["reg_cache"] = await asyncio.to_thread(_load_reg_and_students_sync)
-            state["reg_cache_ts"] = now
-        return state["reg_cache"]
+        if state["reg_cache"] is not None and (now - state["reg_cache_ts"] <= 180):
+            return state["reg_cache"]
+        async with reg_lock:
+            now = time.time()
+            if state["reg_cache"] is None or (now - state["reg_cache_ts"] > 180):
+                state["reg_cache"] = await asyncio.to_thread(_load_reg_and_students_sync)
+                state["reg_cache_ts"] = time.time()
+            return state["reg_cache"]
 
     async def get_user_access(tg_id: int) -> dict:
         bundle = await get_reg_bundle()
@@ -384,12 +396,16 @@ def create_webapp_router(
 
     async def get_library_and_keys():
         now = time.time()
-        if state["lib_cache"] is None or (now - state["lib_cache_ts"] > 300):
-            items, by_id, keys_by_id = await asyncio.to_thread(_load_library_and_keys_sync)
-            state["lib_cache"] = (items, by_id)
-            state["keys_cache"] = keys_by_id
-            state["lib_cache_ts"] = now
-        return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
+        if state["lib_cache"] is not None and (now - state["lib_cache_ts"] <= 300):
+            return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
+        async with lib_lock:
+            now = time.time()
+            if state["lib_cache"] is None or (now - state["lib_cache_ts"] > 300):
+                items, by_id, keys_by_id = await asyncio.to_thread(_load_library_and_keys_sync)
+                state["lib_cache"] = (items, by_id)
+                state["keys_cache"] = keys_by_id
+                state["lib_cache_ts"] = time.time()
+            return state["lib_cache"][0], state["lib_cache"][1], state["keys_cache"]
 
     def get_trial_doc_ids(items: list[dict], grade: str, stream: str) -> set[str]:
         grade_matches = [
@@ -444,10 +460,16 @@ def create_webapp_router(
         return tg_id, access
 
     async def require_admin(request: Request) -> tuple[int, dict]:
-        tg_id, access = await require_session(request)
-        if not access.get("is_admin"):
+        hdr = request.headers.get("authorization", "")
+        auth_token = hdr[7:].strip() if hdr.lower().startswith("bearer ") else ""
+        if not auth_token:
+            raise HTTPException(status_code=401, detail="Missing token")
+        tg_id = verify_session_token(auth_token)
+        if not tg_id:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+        if tg_id != admin_user_id:
             raise HTTPException(status_code=403, detail="Admin access required")
-        return tg_id, access
+        return tg_id, {"is_admin": True}
 
     def _flush_analytics_sync(rows: list[list[str]]):
         _, _, _, analytics_sheet, _, _, _, _ = get_all_worksheets_fn()
