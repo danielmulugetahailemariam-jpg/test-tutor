@@ -39,59 +39,81 @@ def extract_grade(text_lower: str) -> str:
     if re.search(r"(?:10\s*(?:&|and|-|to)\s*11)", text_lower):
         return "Grade 10-11"
 
-    explicit_patterns = [
-        (r"(?:\bgrade|\bg)[.\-_\s]*12\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*12\b", "Grade 12"),
-        (r"(?:\bgrade|\bg)[.\-_\s]*11\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*11\b", "Grade 11"),
-        (r"(?:\bgrade|\bg)[.\-_\s]*10\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*10\b", "Grade 10"),
-        (r"(?:\bgrade|\bg)[.\-_\s]*9\b|\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|hist|eco|eng)\s*9\b", "Grade 9"),
-        (r"(?:\bgrade|\bg)[.\-_\s]*8\b", "Grade 8"),
-        (r"(?:\bgrade|\bg)[.\-_\s]*6\b", "Grade 6"),
-    ]
-    for pat, label in explicit_patterns:
-        if re.search(pat, text_lower):
-            return label
+    # Check Grades 12 down to 1 so "12" never matches "1"
+    for n in (12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1):
+        if re.search(
+            rf"(?:\bgrade|\bgr\.?|\bg|\bclass|\bkutaa)\s*[.\-_\s]*{n}(?!\d)|"
+            rf"\b{n}(?:st|nd|rd|th)\s+(?:grade|gr\.?)\b|"
+            rf"\b(?:chem|chemistry|bio|biology|phy|physics|math|maths|geo|geog|geography|"
+            rf"hist|history|eco|econ|economics|eng|english|civics|amharic|oromo|science)[.\-_\s]*{n}(?!\d)",
+            text_lower,
+        ):
+            return f"Grade {n}"
 
     if "remedial" in text_lower:
         return "Remedial"
     if "freshman" in text_lower or "fresh man" in text_lower:
         return "Freshman"
 
-    if re.search(r"\b(?:euee|esslce|uee|matric|entrance|pilot|model|uat|astu|aastu|sat)\b", text_lower):
+    if re.search(
+        r"\b(?:euee|esslce|uee|matric|entrance|pilot|model|uat|astu|aastu|sat|"
+        r"post\s*test|pre[\s\-]*entrance|analogies|analogy)\b",
+        text_lower,
+    ):
         return "Grade 12"
+
+    if re.search(r"\bministry\b", text_lower):
+        return "Grade 8"
 
     return "General"
 
 
 def extract_subject(original_text: str, text_lower: str) -> str:
-    if re.search(r"\b(?:bio|biology|genetics|enzymes|evolution)\b", text_lower):
+    num_opt = r"(?:1[0-2]|[1-9])?"
+    if re.search(rf"\b(?:bio|biology){num_opt}\b|\b(?:genetics|enzymes|evolution)\b", text_lower):
         return "Biology"
-    if re.search(r"\b(?:chem|chemistry|thermodynamics)\b|acid[\s\-_]*base|chemical\s+bonding", text_lower):
+    if re.search(rf"\b(?:chem|chemistry){num_opt}\b|\bthermodynamics\b|acid[\s\-_]*base|chemical\s+bonding", text_lower):
         return "Chemistry"
     if re.search(
-        r"\b(?:phy|physics|dynamics|kinematics|vectors|satellites)\b|fluid\s+statics|wave\s+motion|measurement\s+and\s+practical",
+        rf"\b(?:phy|physics){num_opt}\b|\b(?:dynamics|kinematics|vectors|satellites)\b|"
+        r"fluid\s+statics|wave\s+motion|measurement\s+and\s+practical",
         text_lower,
     ):
         return "Physics"
     if re.search(
-        r"\b(?:math|maths|mathmatics|mathematics|logarithms|integration|trigonometry|matrices|derivative|calculus|exponential)\b|number\s+system|relations\s+and\s+functions",
+        rf"\b(?:math|maths|mathmatics|mathematics){num_opt}\b|"
+        r"\b(?:logarithms|integration|trigonometry|matrices|derivative|calculus|exponential)\b|"
+        r"number\s+system|relations\s+and\s+functions",
         text_lower,
     ):
         return "Mathematics"
     if re.search(r"\b(?:aptitude|uat|sat|analogies|analogy|gmat|scholastic)\b", text_lower):
         return "Aptitude (SAT)"
     if re.search(
-        r"\b(?:eng|english|englsih|grammar|vocabulary|punctuation|tense|synonym|antonym)\b|"
-        r"reading\s*comprehension|sentence\s*comp|parts\s+of\s+speech|subject\s+verb|active\s+and\s+passive|letter\s+writing|"
-        r"\b[bc][12]\s+words\b|ke\s+90\s+belay",
+        rf"\b(?:eng|english|englsih){num_opt}\b|\b(?:grammar|vocabulary|punctuation|tense|synonym|antonym)\b|"
+        r"reading\s*comprehension|sentence\s*comp|parts\s+of\s+speech|subject\s+verb|"
+        r"active\s+and\s+passive|letter\s+writing|\b[bc][12]\s+words\b|ke\s+90\s+belay",
         text_lower,
     ):
         return "English"
-    if re.search(r"\b(?:geo|geogrph|geography)\b|physical\s+environment\s+of\s+the\s+earth", text_lower):
+    if re.search(rf"\b(?:geo|geog|geogrph|geography){num_opt}\b|physical\s+environment\s+of\s+the\s+earth", text_lower):
         return "Geography"
-    if re.search(r"\b(?:hist|history)\b", text_lower):
+    if re.search(rf"\b(?:hist|history){num_opt}\b", text_lower):
         return "History"
-    if re.search(r"\b(?:eco|econ|economics)\b|aggregate\s+demand|consumer\s+theory", text_lower):
+    if re.search(rf"\b(?:eco|econ|economics){num_opt}\b|aggregate\s+demand|consumer\s+theory", text_lower):
         return "Economics"
+    if re.search(rf"\b(?:civics|citizenship|moral){num_opt}\b", text_lower):
+        return "Civics / Citizenship"
+    if re.search(rf"\b(?:amharic|amh){num_opt}\b|አማርኛ", text_lower):
+        return "Amharic"
+    if re.search(rf"\b(?:afaan\s*oromoo?|oromo|oromiffa){num_opt}\b", text_lower):
+        return "Afaan Oromoo"
+    if re.search(r"general\s+science", text_lower):
+        return "General Science"
+    if re.search(r"environmental\s+science", text_lower):
+        return "Environmental Science"
+    if re.search(r"social\s+studies", text_lower):
+        return "Social Studies"
     if re.search(r"(?<![a-zA-Z])IT(?![a-zA-Z])", original_text) or re.search(
         r"information\s+technology|computer\s+networking", text_lower
     ):
@@ -151,16 +173,31 @@ def extract_round_or_code(text_lower: str) -> str:
     return " ".join(parts)
 
 
-def classify_material(filename: str, caption: str = "") -> dict:
+def classify_material(filename: str, caption: str = "", folder_path: str = "") -> dict:
     raw = f"{filename} {caption}".strip()
     cleaned = re.sub(r"[_\[\]()@]+", " ", raw)
     cleaned_no_ext = re.sub(r"\.(pdf|pptx|docx)$", "", cleaned, flags=re.IGNORECASE)
     text_lower = cleaned_no_ext.lower()
 
+    folder_cleaned = re.sub(r"[_\[\]()@/\\]+", " ", folder_path or "").strip()
+    folder_lower = folder_cleaned.lower()
+
     grade = extract_grade(text_lower)
+    if grade == "General" and folder_lower:
+        grade = extract_grade(folder_lower)
+
     subject = extract_subject(raw, text_lower)
+    if subject == "General" and folder_lower:
+        subject = extract_subject(folder_cleaned, folder_lower)
+
     stream = extract_stream(text_lower, subject)
+    if stream == "General" and folder_lower:
+        stream = extract_stream(folder_lower, subject)
+
     year = extract_year(text_lower)
+    if not year and folder_lower:
+        year = extract_year(folder_lower)
+
     round_or_code = extract_round_or_code(text_lower)
 
     has_embedded = bool(
