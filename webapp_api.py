@@ -52,6 +52,7 @@ def create_webapp_router(
     trigger_verify_links_fn=None,
 ):
     router = APIRouter()
+    EAT_TZ = eat_tz
     session_secret = hashlib.sha256((bot_token + ":qelal_webapp_v6").encode()).digest()
     boot_ver = str(int(time.time()))
     no_cache_headers = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
