@@ -183,6 +183,7 @@
       sentChatOk: "Sent to your Telegram chat.",
       adminSyncTitle: "Google Drive Sync & PDF Verification",
       syncDriveBtn: "Sync Google Drive",
+      reclassifyBtn: "Re-Classify PDFs",
       verifyLinksBtn: "Verify PDF Links (40)",
       forceVerifyBtn: "Force Re-Verify",
       refreshAdminBtn: "Refresh Data",
@@ -361,6 +362,7 @@
       sentChatOk: "ወደ ቴሌግራም ቻትዎ ተልኳል።",
       adminSyncTitle: "የGoogle Drive እና PDF ማገናኛ",
       syncDriveBtn: "Google Drive አስምር",
+      reclassifyBtn: "PDF እንደገና መድብ",
       verifyLinksBtn: "PDF አረጋግጥ (40)",
       forceVerifyBtn: "እንደገና አረጋግጥ",
       refreshAdminBtn: "መረጃ አድስ",
@@ -539,6 +541,7 @@
       sentChatOk: "Gara chaatii Telegram keessaniitti ergameera.",
       adminSyncTitle: "Qindaa'ina Google Drive fi Mirkaneessa PDF",
       syncDriveBtn: "Google Drive Qindeessi",
+      reclassifyBtn: "PDF Irra Deebi'ii Qoodi",
       verifyLinksBtn: "PDF Mirkaneessi (40)",
       forceVerifyBtn: "Irra Deebi'ii Mirkaneessi",
       refreshAdminBtn: "Haaromsi",
@@ -2275,10 +2278,11 @@
     const box = document.getElementById("adminJobsBox");
     if (!box) return;
     const sync = (jobs && jobs.sync) || {};
+    const reclassify = (jobs && jobs.reclassify) || {};
     const verify = (jobs && jobs.verify) || {};
 
-    const syncTag = sync.running ? "is-warn" : sync.ok === false ? "is-rubric" : sync.ok === true ? "is-pass" : "";
-    const verifyTag = verify.running ? "is-warn" : verify.ok === false ? "is-rubric" : verify.ok === true ? "is-pass" : "";
+    const tagFor = (j) => (j.running ? "is-warn" : j.ok === false ? "is-rubric" : j.ok === true ? "is-pass" : "");
+    const labelFor = (j) => (j.running ? "RUNNING" : j.ok === false ? "FAILED" : j.ok === true ? "DONE" : "IDLE");
 
     box.innerHTML = `
       <div class="compact-list">
@@ -2287,22 +2291,31 @@
             <div class="doc-title">Google Drive Sync</div>
             <div class="doc-meta">${esc(sync.running ? sync.message || "Running..." : sync.last_summary || sync.message || "Idle")}${sync.updated_at ? " · " + esc(sync.updated_at) : ""}</div>
           </div>
-          <span class="status-tag ${syncTag}">${esc(sync.running ? "RUNNING" : sync.ok === false ? "FAILED" : sync.ok === true ? "DONE" : "IDLE")}</span>
+          <span class="status-tag ${tagFor(sync)}">${labelFor(sync)}</span>
+        </div>
+        <div class="compact-row">
+          <div style="min-width:0;">
+            <div class="doc-title">PDF Re-Classify</div>
+            <div class="doc-meta">${esc(reclassify.running ? reclassify.message || "Running..." : reclassify.last_summary || reclassify.message || "Idle")}${reclassify.updated_at ? " · " + esc(reclassify.updated_at) : ""}</div>
+          </div>
+          <span class="status-tag ${tagFor(reclassify)}">${labelFor(reclassify)}</span>
         </div>
         <div class="compact-row">
           <div style="min-width:0;">
             <div class="doc-title">PDF Link Verification</div>
             <div class="doc-meta">${esc(verify.running ? verify.message || "Running..." : verify.last_summary || verify.message || "Idle")}${verify.updated_at ? " · " + esc(verify.updated_at) : ""}</div>
           </div>
-          <span class="status-tag ${verifyTag}">${esc(verify.running ? "RUNNING" : verify.ok === false ? "FAILED" : verify.ok === true ? "DONE" : "IDLE")}</span>
+          <span class="status-tag ${tagFor(verify)}">${labelFor(verify)}</span>
         </div>
       </div>
     `;
 
     const btnSync = document.getElementById("btnAdminSyncDrive");
+    const btnReclass = document.getElementById("btnAdminReclassify");
     const btnVerify = document.getElementById("btnAdminVerifyLinks");
     const btnForce = document.getElementById("btnAdminForceVerify");
     if (btnSync) btnSync.disabled = !!sync.running;
+    if (btnReclass) btnReclass.disabled = !!reclassify.running;
     if (btnVerify) btnVerify.disabled = !!verify.running;
     if (btnForce) btnForce.disabled = !!verify.running;
   }
@@ -2317,23 +2330,27 @@
       try {
         const res = await apiFetch("/api/admin/job-status");
         const jobs = res.jobs || {};
-        const prevSync = state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.sync && state.adminOverview.jobs.sync.running;
-        const prevVerify = state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.verify && state.adminOverview.jobs.verify.running;
+        const prevSync = !!(state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.sync && state.adminOverview.jobs.sync.running);
+        const prevReclass = !!(state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.reclassify && state.adminOverview.jobs.reclassify.running);
+        const prevVerify = !!(state.adminOverview && state.adminOverview.jobs && state.adminOverview.jobs.verify && state.adminOverview.jobs.verify.running);
         if (state.adminOverview) {
           state.adminOverview.jobs = jobs;
         }
         renderAdminJobsBox(jobs);
 
-        const nowRunning = !!(jobs.sync && jobs.sync.running) || !!(jobs.verify && jobs.verify.running);
+        const nowRunning =
+          !!(jobs.sync && jobs.sync.running) ||
+          !!(jobs.reclassify && jobs.reclassify.running) ||
+          !!(jobs.verify && jobs.verify.running);
         if (!nowRunning) {
           stopAdminJobPolling();
-          if (prevSync || prevVerify) {
+          if (prevSync || prevReclass || prevVerify) {
             await renderAdminView(true);
-            await loadLibrary(true);
+            await loadLibrary(false);
           }
         }
       } catch (_) {}
-    }, 4000);
+    }, 4500);
   }
 
   function renderAdminAccountsList() {
@@ -2508,7 +2525,7 @@
           });
           showToast(t("actionDone"));
           await renderAdminView(true);
-          await loadLibrary(true);
+          await loadLibrary(false);
         } catch (err) {
           showToast(err.message, true);
           btn.disabled = false;
@@ -2526,7 +2543,7 @@
           });
           showToast(t("actionDone"));
           await renderAdminView(true);
-          await loadLibrary(true);
+          await loadLibrary(false);
         } catch (err) {
           showToast(err.message, true);
           btn.disabled = false;
@@ -2580,6 +2597,7 @@
         <div id="adminJobsBox"></div>
         <div class="btn-row">
           <button type="button" id="btnAdminSyncDrive" class="btn btn-primary btn-sm">${esc(t("syncDriveBtn"))}</button>
+          <button type="button" id="btnAdminReclassify" class="btn btn-secondary btn-sm">${esc(t("reclassifyBtn"))}</button>
           <button type="button" id="btnAdminVerifyLinks" class="btn btn-primary btn-sm">${esc(t("verifyLinksBtn"))}</button>
           <button type="button" id="btnAdminForceVerify" class="btn btn-secondary btn-sm">${esc(t("forceVerifyBtn"))}</button>
         </div>
@@ -2716,7 +2734,7 @@
     renderAdminPdfsList();
     renderAdminAccountsList();
 
-    if ((jobs.sync && jobs.sync.running) || (jobs.verify && jobs.verify.running)) {
+    if ((jobs.sync && jobs.sync.running) || (jobs.reclassify && jobs.reclassify.running) || (jobs.verify && jobs.verify.running)) {
       startAdminJobPolling();
     } else {
       stopAdminJobPolling();
@@ -2733,6 +2751,20 @@
         }
         startAdminJobPolling();
         showToast(res.already_running ? res.detail : "Google Drive sync started...");
+      } catch (err) {
+        showToast(err.message, true);
+      }
+    });
+
+    document.getElementById("btnAdminReclassify").addEventListener("click", async () => {
+      try {
+        const res = await apiFetch("/api/admin/reclassify-library", { method: "POST" });
+        if (res.jobs) {
+          state.adminOverview.jobs = res.jobs;
+          renderAdminJobsBox(res.jobs);
+        }
+        startAdminJobPolling();
+        showToast(res.already_running ? res.detail : "Re-classifying PDFs...");
       } catch (err) {
         showToast(err.message, true);
       }
